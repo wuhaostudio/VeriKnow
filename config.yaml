@@ -1,0 +1,8 @@
+data_dir: data
+database_path: data/memory.sqlite
+default_scope: public_web
+default_output_format: markdown
+default_publish_target: local
+computer_use_domain_allowlist: ""
+computer_use_approval_keywords: "login,sign in,password,billing,payment,purchase,delete,destructive,account change,account settings"
+default_reverify_interval_days: 30
