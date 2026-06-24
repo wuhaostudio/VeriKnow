@@ -22,6 +22,14 @@ DEFAULT_CONFIG = {
         "account change,account settings"
     ),
     "default_reverify_interval_days": 30,
+    "model_provider": "zhipu",
+    "model_name": "glm-5.2",
+    "model_api_key_env": "ZHIPUAI_API_KEY",
+    "model_base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "model_temperature": 0,
+    "model_timeout_seconds": 60,
+    "model_max_output_tokens": 4000,
+    "model_store_prompts": True,
 }
 
 
@@ -40,6 +48,14 @@ class Config:
     computer_use_domain_allowlist: tuple[str, ...] = ()
     computer_use_approval_keywords: tuple[str, ...] = ()
     default_reverify_interval_days: int = 30
+    model_provider: str = "zhipu"
+    model_name: str = "glm-5.2"
+    model_api_key_env: str = "ZHIPUAI_API_KEY"
+    model_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    model_temperature: float = 0
+    model_timeout_seconds: int = 60
+    model_max_output_tokens: int = 4000
+    model_store_prompts: bool = True
 
     @property
     def runs_dir(self) -> Path:
@@ -76,7 +92,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         default_publish_target=str(
             values.get("default_publish_target", DEFAULT_CONFIG["default_publish_target"])
         ),
-        publisher_allow_stub=bool(values.get("publisher_allow_stub", DEFAULT_CONFIG["publisher_allow_stub"])),
+        publisher_allow_stub=_parse_bool(
+            values.get("publisher_allow_stub", DEFAULT_CONFIG["publisher_allow_stub"])
+        ),
         feishu_base_url=str(values.get("feishu_base_url", DEFAULT_CONFIG["feishu_base_url"])),
         feishu_folder_token=str(values.get("feishu_folder_token", DEFAULT_CONFIG["feishu_folder_token"])),
         feishu_document_url_template=str(
@@ -102,6 +120,20 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 "default_reverify_interval_days",
                 DEFAULT_CONFIG["default_reverify_interval_days"],
             )
+        ),
+        model_provider=str(values.get("model_provider", DEFAULT_CONFIG["model_provider"])),
+        model_name=str(values.get("model_name", DEFAULT_CONFIG["model_name"])),
+        model_api_key_env=str(values.get("model_api_key_env", DEFAULT_CONFIG["model_api_key_env"])),
+        model_base_url=str(values.get("model_base_url", DEFAULT_CONFIG["model_base_url"])),
+        model_temperature=float(values.get("model_temperature", DEFAULT_CONFIG["model_temperature"])),
+        model_timeout_seconds=int(
+            values.get("model_timeout_seconds", DEFAULT_CONFIG["model_timeout_seconds"])
+        ),
+        model_max_output_tokens=int(
+            values.get("model_max_output_tokens", DEFAULT_CONFIG["model_max_output_tokens"])
+        ),
+        model_store_prompts=_parse_bool(
+            values.get("model_store_prompts", DEFAULT_CONFIG["model_store_prompts"])
         ),
     )
 
@@ -157,3 +189,9 @@ def _parse_csv_setting(value: Any) -> tuple[str, ...]:
     if isinstance(value, (list, tuple)):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return tuple(item.strip() for item in str(value).split(",") if item.strip())
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

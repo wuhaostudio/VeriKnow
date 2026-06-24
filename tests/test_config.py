@@ -24,6 +24,14 @@ class ConfigTests(unittest.TestCase):
                         "computer_use_domain_allowlist: example.com, docs.example.com",
                         "computer_use_approval_keywords: login,payment,delete",
                         "default_reverify_interval_days: 14",
+                        "model_provider: stub",
+                        "model_name: glm-test",
+                        "model_api_key_env: TEST_MODEL_KEY",
+                        "model_base_url: https://example.bigmodel.test/api/paas/v4",
+                        "model_temperature: 0.2",
+                        "model_timeout_seconds: 12",
+                        "model_max_output_tokens: 256",
+                        "model_store_prompts: false",
                     ]
                 ),
                 encoding="utf-8",
@@ -46,3 +54,12 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.computer_use_domain_allowlist, ("example.com", "docs.example.com"))
             self.assertEqual(config.computer_use_approval_keywords, ("login", "payment", "delete"))
             self.assertEqual(config.default_reverify_interval_days, 14)
+            self.assertEqual(config.model_provider, "stub")
+            self.assertEqual(config.model_name, "glm-test")
+            self.assertEqual(config.model_api_key_env, "TEST_MODEL_KEY")
+            self.assertEqual(config.model_base_url, "https://example.bigmodel.test/api/paas/v4")
+            self.assertEqual(config.model_temperature, 0.2)
+            self.assertEqual(config.model_timeout_seconds, 12)
+            self.assertEqual(config.model_max_output_tokens, 256)
+            self.assertFalse(config.model_store_prompts)
+

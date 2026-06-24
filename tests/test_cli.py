@@ -9,6 +9,100 @@ from veriknow.cli import main
 
 
 class CliTests(unittest.TestCase):
+    def test_llm_check_command_reports_stub_available(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: stub",
+                        "model_name: stub-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                main(["llm", "check", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["provider"], "stub")
+            self.assertTrue(output["available"])
+            self.assertEqual(output["status"], "available")
+
+    def test_llm_check_command_reports_missing_zhipu_key(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: zhipu",
+                        "model_api_key_env: ZHIPUAI_API_KEY",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with patch.dict("os.environ", {}, clear=True):
+                with redirect_stdout(stdout):
+                    main(["llm", "check", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["provider"], "zhipu")
+            self.assertFalse(output["available"])
+            self.assertEqual(output["status"], "blocked")
+            self.assertEqual(output["error_code"], "missing_api_key")
+
+    def test_run_command_ai_normalizer_writes_artifact_on_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: stub",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                main([
+                    "run",
+                    "帮我研究智谱 platform API 的最新用法",
+                    "--normalizer",
+                    "ai",
+                    "--dry-run",
+                    "--config",
+                    str(config_path),
+                ])
+
+            output = json.loads(stdout.getvalue())
+            artifact_path = Path(output["artifacts"]["llm_normalizer"])
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(output["status"], "dry_run")
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact["strategy"], "ai")
+            self.assertEqual(artifact["provider"], "stub")
+            self.assertEqual(artifact["status"], "fallback")
+            self.assertTrue(artifact["fallback_used"])
     def test_research_command_creates_evidence_output(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -35,6 +129,44 @@ class CliTests(unittest.TestCase):
             self.assertIn("confidence", output["items"][0])
             self.assertTrue((tmp_path / "data" / "runs").exists())
 
+    def test_research_command_ai_strategy_writes_artifact_on_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: stub",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                main([
+                    "research",
+                    "LangChain multi-agent supervisor workflow",
+                    "--strategy",
+                    "ai",
+                    "--config",
+                    str(config_path),
+                ])
+
+            output = json.loads(stdout.getvalue())
+            run_dir = tmp_path / "data" / "runs" / output["task_id"]
+            artifact_path = run_dir / "llm" / "research.json"
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertTrue(output["items"])
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact["strategy"], "ai")
+            self.assertEqual(artifact["provider"], "stub")
+            self.assertEqual(artifact["status"], "fallback")
+            self.assertTrue(artifact["fallback_used"])
     def test_research_command_writes_related_knowledge_artifact(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -444,3 +576,4 @@ class CliTests(unittest.TestCase):
             self.assertEqual(patch["target_path"], str(knowledge_path))
             self.assertFalse(patch["approved"])
             self.assertEqual(knowledge_path.read_text(encoding="utf-8"), original)
+

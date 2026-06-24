@@ -6,14 +6,15 @@ import sys
 from pathlib import Path
 
 from veriknow.config import create_default_config, ensure_data_dirs, load_config
+from veriknow.llm import create_llm_client
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.adaptive_profile import AdaptiveProfile
 from veriknow.modules.curator import KnowledgeCurator, load_knowledge_patch
 from veriknow.modules.knowledge import MarkdownKnowledgeIndex, title_from_markdown
-from veriknow.modules.normalizer import RequirementNormalizer
+from veriknow.modules.normalizer import AIRequirementNormalizer, RequirementNormalizer, SUPPORTED_NORMALIZER_STRATEGIES
 from veriknow.modules.planner import VerificationPlanner, render_verification_checklist
 from veriknow.modules.publisher import publish_document
-from veriknow.modules.researcher import Researcher
+from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESEARCH_STRATEGIES
 from veriknow.modules.verifier import Verifier
 from veriknow.schemas import EvidenceBundle, VerificationPlan
 from veriknow.tools.computer_use import ComputerUseSafetyConfig, ComputerUseVerifier
@@ -48,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Normalize a task and create a local run.")
     run_parser.add_argument("request", help="Raw research or verification request.")
     run_parser.add_argument("--dry-run", action="store_true", help="Stop after normalization.")
+    run_parser.add_argument(
+        "--normalizer",
+        choices=sorted(SUPPORTED_NORMALIZER_STRATEGIES),
+        default="deterministic",
+        help="Task normalization strategy.",
+    )
     run_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     run_parser.set_defaults(handler=handle_run)
 
@@ -55,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     research_parser.add_argument("query", nargs="?", help="Research query. Required unless --run-id is used.")
     research_parser.add_argument("--run-id", help="Research an existing run instead of creating a new one.")
     research_parser.add_argument("--limit", type=int, default=5, help="Maximum number of sources to keep.")
+    research_parser.add_argument(
+        "--strategy",
+        choices=sorted(SUPPORTED_RESEARCH_STRATEGIES),
+        default="deterministic",
+        help="Research strategy.",
+    )
     research_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     research_parser.set_defaults(handler=handle_research)
 
@@ -78,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     verify_parser.set_defaults(handler=handle_verify)
+
+    llm_parser = subparsers.add_parser("llm", help="Inspect configured model provider.")
+    llm_parser.set_defaults(handler=lambda _: llm_parser.print_help())
+    llm_subparsers = llm_parser.add_subparsers(dest="llm_command")
+    llm_check_parser = llm_subparsers.add_parser("check", help="Check whether the configured model provider is available.")
+    llm_check_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    llm_check_parser.set_defaults(handler=handle_llm_check)
 
     memory_parser = subparsers.add_parser("memory", help="Inspect local memory records.")
     memory_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
@@ -176,11 +196,22 @@ def handle_init(args: argparse.Namespace) -> None:
 def handle_run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     ensure_data_dirs(config)
-    task = RequirementNormalizer(config).normalize(args.request)
+    artifact = None
+    if args.normalizer == "ai":
+        result = AIRequirementNormalizer(config, create_llm_client(config)).normalize(args.request)
+        task = result.task
+        artifact = result.artifact
+    else:
+        task = RequirementNormalizer(config).normalize(args.request)
+
     store = MemoryStore(config)
     record = store.create_run(args.request, task)
+    artifacts = {}
+    if artifact is not None:
+        artifact_path = _write_llm_artifact(store.run_dir(record.run_id), "normalizer", artifact.to_dict())
+        artifacts["llm_normalizer"] = str(artifact_path)
     status = "dry_run" if args.dry_run else "created"
-    record = store.update_run(record.run_id, status=status)
+    record = store.update_run(record.run_id, status=status, artifacts=artifacts)
     print(json.dumps(record.to_dict(), ensure_ascii=False, indent=2))
 
 
@@ -199,7 +230,14 @@ def handle_research(args: argparse.Namespace) -> None:
         task = RequirementNormalizer(config).normalize(args.query)
         record = store.create_run(args.query, task)
 
-    bundle = Researcher().research(record.task, run_id=record.run_id, limit=args.limit)
+    research_artifact = None
+    if args.strategy == "ai":
+        result = AIResearcher(create_llm_client(config)).research(record.task, run_id=record.run_id, limit=args.limit)
+        bundle = result.bundle
+        research_artifact = result.artifact
+    else:
+        bundle = Researcher().research(record.task, run_id=record.run_id, limit=args.limit)
+
     evidence_path = store.run_dir(record.run_id) / "evidence.json"
     evidence_path.write_text(
         json.dumps(bundle.to_dict(), ensure_ascii=False, indent=2),
@@ -211,14 +249,14 @@ def handle_research(args: argparse.Namespace) -> None:
         store.run_dir(record.run_id),
         extra_text=bundle.summary,
     )
-    store.update_run(
-        record.run_id,
-        status="researched",
-        artifacts={
-            "evidence": str(evidence_path),
-            "related_knowledge": str(related_path),
-        },
-    )
+    artifacts = {
+        "evidence": str(evidence_path),
+        "related_knowledge": str(related_path),
+    }
+    if research_artifact is not None:
+        artifact_path = _write_llm_artifact(store.run_dir(record.run_id), "research", research_artifact.to_dict())
+        artifacts["llm_research"] = str(artifact_path)
+    store.update_run(record.run_id, status="researched", artifacts=artifacts)
     print(json.dumps(bundle.to_dict(), ensure_ascii=False, indent=2))
 
 
@@ -284,6 +322,12 @@ def handle_verify(args: argparse.Namespace) -> None:
         artifacts={"verification": str(verification_path)},
     )
     print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
+
+
+def handle_llm_check(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    result = create_llm_client(config).check()
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
 
 
 def handle_memory_runs(args: argparse.Namespace) -> None:
@@ -547,6 +591,13 @@ def handle_reverify(args: argparse.Namespace) -> None:
     print(json.dumps(record.to_dict(), ensure_ascii=False, indent=2))
 
 
+def _write_llm_artifact(run_dir: Path, name: str, payload: dict) -> Path:
+    llm_dir = run_dir / "llm"
+    llm_dir.mkdir(parents=True, exist_ok=True)
+    path = llm_dir / f"{name}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
 def _load_evidence(path: str | None) -> EvidenceBundle | None:
     if not path:
         return None
@@ -598,3 +649,4 @@ def _knowledge_document_path(document_path: str, knowledge_dir: Path) -> Path:
     if path.suffix.lower() != ".md":
         raise ValueError(f"knowledge document must be Markdown: {path}")
     return path
+

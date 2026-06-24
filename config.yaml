@@ -6,3 +6,11 @@ default_publish_target: local
 computer_use_domain_allowlist: ""
 computer_use_approval_keywords: "login,sign in,password,billing,payment,purchase,delete,destructive,account change,account settings"
 default_reverify_interval_days: 30
+model_provider: zhipu
+model_name: glm-5.2
+model_api_key_env: "ZHIPU_API_KEY"
+model_base_url: https://open.bigmodel.cn/api/paas/v4
+model_temperature: 0
+model_timeout_seconds: 60
+model_max_output_tokens: 4000
+model_store_prompts: true
