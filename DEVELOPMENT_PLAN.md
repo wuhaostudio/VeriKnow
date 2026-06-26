@@ -656,7 +656,18 @@ The resulting `TaskSpec` should be structured, localized, and traceable to the s
 
 ## Phase 13: Live Search and AI Evidence Extraction
 
-Status: Planned.
+Status: In progress; live search provider boundary completed.
+
+Current scope:
+
+- `search_provider` config and `veriknow research --search-provider ...` select the search backend.
+- Static seed search remains the default deterministic backend for local and test runs.
+- Brave Search is available as an optional live backend using `BRAVE_SEARCH_API_KEY` or `search_api_key_env`.
+- Missing live-search credentials fail explicitly instead of silently falling back to static results.
+- `search_fetch_pages: true` writes normalized page snapshots to `fetched_documents.json`.
+- `search_store_raw_pages: true` also stores raw HTML under `data/runs/<run_id>/raw_pages/` and records each raw path.
+- Deterministic claim extraction writes `extracted_claims.json` from fetched documents.
+- Deterministic claim extraction writes `extracted_claims.json` from fetched documents.
 
 Goal: replace static seed search with real search backends and model-assisted evidence extraction.
 
@@ -697,14 +708,27 @@ FetchedDocument
 
 Tasks:
 
-1. Generate multiple search queries from the task.
-2. Call one or more live search providers.
-3. Fetch and normalize source pages.
-4. Prefer official docs, official repositories, standards, and vendor sources.
-5. Use the model to extract claims, dates, version constraints, and source caveats.
-6. Detect conflicting claims across sources.
-7. Preserve raw search results, fetched documents, extracted claims, and final `EvidenceBundle`.
-8. Keep the static provider available for tests and offline runs.
+Completed:
+
+1. Add search provider configuration and CLI override.
+2. Keep static seed search as the default deterministic backend.
+3. Add Brave Search as the first optional live backend.
+4. Fetch and normalize source pages into `fetched_documents.json`.
+5. Optionally store raw HTML under `raw_pages/` only when explicitly enabled.
+
+Remaining before Phase 15:
+
+1. Promote deterministic `EvidenceClaim` extraction from initial implementation to stable artifact contract.
+2. Extract claims, dates, version constraints, quotes, source caveats, and freshness metadata.
+3. Add conflict detection across extracted claims.
+4. Preserve raw search results, fetched documents, extracted claims, conflicts, and final `EvidenceBundle`.
+5. Let AI research use fetched page text when available, with deterministic fallback and stored model artifacts.
+6. Add evaluation fixtures for claim extraction and conflict detection before expanding providers.
+
+Deferred:
+
+1. Add Bing, SerpApi, or hybrid search only after the claim extraction contract is stable.
+2. Generate multiple search queries from a task only after single-query live search is reliable.
 
 Configuration keys:
 
@@ -726,10 +750,20 @@ veriknow research --run-id <run_id> --search-provider brave --strategy ai
 
 Deliverables:
 
-- live search provider
+Completed:
+
+- live search provider boundary
+- Brave Search provider
 - page fetcher
-- AI claim extractor
+- normalized fetched document artifact
+- optional raw HTML storage
+
+Next deliverables:
+
+- `EvidenceClaim` schema and deterministic artifact
+- AI claim extractor using fetched page text
 - conflict detection
+- source freshness and caveat metadata
 - richer `evidence.json`
 
 Acceptance:
@@ -742,7 +776,14 @@ The evidence output must include concrete source URLs, extracted claims, source 
 
 ## Phase 14: AI Verification Planning
 
-Status: Planned.
+Status: Completed for the explicit AI planning strategy.
+
+Current scope:
+
+- `veriknow plan <run_id> --strategy ai` uses the configured model provider to propose a verification plan.
+- The deterministic planner remains the fallback and default strategy.
+- AI planning stores the prompt, seed plan, model output, fallback status, and validated plan under `data/runs/<run_id>/llm/planner.json`.
+- Model-generated browser and computer-use steps are rejected unless they include a concrete source URL.
 
 Goal: generate higher-quality verification plans from extracted claims and source conflicts.
 
@@ -775,7 +816,144 @@ veriknow plan <run_id> --strategy ai
 
 The plan should directly reference extracted claims and should not create browser steps without a URL or verifiable expected result.
 
-## Phase 15: AI-Driven Computer Use Runtime
+## Phase 15: AI-Assisted Knowledge Merge
+
+Status: Planned.
+
+Goal: merge verified reports into local Markdown knowledge more precisely than full-file replacement.
+
+Suggested schema:
+
+```text
+KnowledgeMergeProposal
+  operation: create | update | append | replace_section | mark_stale
+  target_path
+  target_title
+  rationale
+  evidence_urls
+  conflicts
+  diff
+  risk_level
+```
+
+Tasks:
+
+1. Retrieve related local knowledge documents.
+2. Ask the model to choose create, update, append, replace section, or mark stale.
+3. Generate section-level diffs when an existing document is selected.
+4. Require evidence URLs for every substantial new claim.
+5. Record conflicts instead of silently resolving them.
+6. Reject proposals that remove source metadata without replacement.
+7. Preserve `veriknow apply <run_id>` as the only write path.
+
+CLI option:
+
+```text
+veriknow curate <run_id> --strategy ai
+```
+
+Deliverables:
+
+- `knowledge_merge_proposal.json`
+- section-level `patch.diff`
+- explicit conflict list
+- safety validation before apply
+
+Acceptance:
+
+```text
+veriknow curate <run_id> --strategy ai
+veriknow apply <run_id>
+```
+
+The system must show what changed, why it changed, which sources support the change, and whether unresolved conflicts remain.
+
+## Phase 16: AI Safety, Evaluation, and Observability
+
+Status: Planned.
+
+Goal: make model-assisted behavior inspectable, testable, and safe enough for routine use.
+
+Tasks:
+
+1. Add golden tests for prompt inputs and expected structured outputs.
+2. Add replay tests from stored run artifacts.
+3. Add safety tests for path traversal, risky computer-use actions, and unapproved publishing.
+4. Add evaluation fixtures for source ranking, claim extraction, and merge quality.
+5. Add cost, latency, token usage, and model error metrics to run artifacts.
+6. Add a `veriknow inspect <run_id>` command for reviewing all artifacts in one place.
+7. Add redaction helpers for secrets, tokens, cookies, and credentials before storing logs.
+
+Deliverables:
+
+- AI evaluation fixtures
+- replayable run artifacts
+- model usage metadata
+- inspection command
+- redaction utilities
+
+Acceptance:
+
+```text
+veriknow inspect <run_id>
+pytest
+```
+
+Reviewers should be able to understand which model calls were made, what evidence was used, which actions were executed, and why each knowledge change was proposed.
+
+## Phase 17: Feishu Update and Publication Sync
+
+Status: Planned.
+
+Goal: treat Feishu as a publication target that can create or update documents while local Markdown remains authoritative.
+
+New publication metadata:
+
+```text
+local_path
+local_content_hash
+target
+target_document_id
+target_url
+last_published_at
+last_published_hash
+remote_revision
+status
+```
+
+Tasks:
+
+1. Store stable Feishu document IDs per local knowledge document.
+2. Add update-existing-document support.
+3. Skip publishing when local content hash has not changed.
+4. Detect remote update conflicts when Feishu exposes revision metadata.
+5. Convert Markdown blocks more faithfully, including headings, lists, links, code blocks, and images.
+6. Keep publication jobs idempotent where possible.
+
+CLI options:
+
+```text
+veriknow publish <document_path> --target feishu
+veriknow publish <document_path> --target feishu --update
+veriknow memory publications
+```
+
+Deliverables:
+
+- Feishu document mapping
+- create/update publish modes
+- content hash tracking
+- richer Markdown-to-Feishu conversion
+
+Acceptance:
+
+```text
+veriknow publish data/knowledge/general/example.md --target feishu --update
+```
+
+If the document has already been published and the local content changed, the existing Feishu document should be updated or a conflict should be recorded.
+
+## Phase 18: AI-Driven Computer Use Runtime
 
 Status: Planned.
 
@@ -874,143 +1052,6 @@ veriknow verify <run_id> --mode computer-use --computer-use-runtime playwright
 
 For allowed public documentation domains, the verifier should navigate, inspect pages, record screenshots, and finish with a clear pass, partial, failed, or blocked result.
 
-## Phase 16: AI-Assisted Knowledge Merge
-
-Status: Planned.
-
-Goal: merge verified reports into local Markdown knowledge more precisely than full-file replacement.
-
-Suggested schema:
-
-```text
-KnowledgeMergeProposal
-  operation: create | update | append | replace_section | mark_stale
-  target_path
-  target_title
-  rationale
-  evidence_urls
-  conflicts
-  diff
-  risk_level
-```
-
-Tasks:
-
-1. Retrieve related local knowledge documents.
-2. Ask the model to choose create, update, append, replace section, or mark stale.
-3. Generate section-level diffs when an existing document is selected.
-4. Require evidence URLs for every substantial new claim.
-5. Record conflicts instead of silently resolving them.
-6. Reject proposals that remove source metadata without replacement.
-7. Preserve `veriknow apply <run_id>` as the only write path.
-
-CLI option:
-
-```text
-veriknow curate <run_id> --strategy ai
-```
-
-Deliverables:
-
-- `knowledge_merge_proposal.json`
-- section-level `patch.diff`
-- explicit conflict list
-- safety validation before apply
-
-Acceptance:
-
-```text
-veriknow curate <run_id> --strategy ai
-veriknow apply <run_id>
-```
-
-The system must show what changed, why it changed, which sources support the change, and whether unresolved conflicts remain.
-
-## Phase 17: Feishu Update and Publication Sync
-
-Status: Planned.
-
-Goal: treat Feishu as a publication target that can create or update documents while local Markdown remains authoritative.
-
-New publication metadata:
-
-```text
-local_path
-local_content_hash
-target
-target_document_id
-target_url
-last_published_at
-last_published_hash
-remote_revision
-status
-```
-
-Tasks:
-
-1. Store stable Feishu document IDs per local knowledge document.
-2. Add update-existing-document support.
-3. Skip publishing when local content hash has not changed.
-4. Detect remote update conflicts when Feishu exposes revision metadata.
-5. Convert Markdown blocks more faithfully, including headings, lists, links, code blocks, and images.
-6. Keep publication jobs idempotent where possible.
-
-CLI options:
-
-```text
-veriknow publish <document_path> --target feishu
-veriknow publish <document_path> --target feishu --update
-veriknow memory publications
-```
-
-Deliverables:
-
-- Feishu document mapping
-- create/update publish modes
-- content hash tracking
-- richer Markdown-to-Feishu conversion
-
-Acceptance:
-
-```text
-veriknow publish data/knowledge/general/example.md --target feishu --update
-```
-
-If the document has already been published and the local content changed, the existing Feishu document should be updated or a conflict should be recorded.
-
-## Phase 18: AI Safety, Evaluation, and Observability
-
-Status: Planned.
-
-Goal: make model-assisted behavior inspectable, testable, and safe enough for routine use.
-
-Tasks:
-
-1. Add golden tests for prompt inputs and expected structured outputs.
-2. Add replay tests from stored run artifacts.
-3. Add safety tests for path traversal, risky computer-use actions, and unapproved publishing.
-4. Add evaluation fixtures for source ranking, claim extraction, and merge quality.
-5. Add cost, latency, token usage, and model error metrics to run artifacts.
-6. Add a `veriknow inspect <run_id>` command for reviewing all artifacts in one place.
-7. Add redaction helpers for secrets, tokens, cookies, and credentials before storing logs.
-
-Deliverables:
-
-- AI evaluation fixtures
-- replayable run artifacts
-- model usage metadata
-- inspection command
-- redaction utilities
-
-Acceptance:
-
-```text
-veriknow inspect <run_id>
-pytest
-```
-
-Reviewers should be able to understand which model calls were made, what evidence was used, which actions were executed, and why each knowledge change was proposed.
-
 ## Execution Order
 
 Build in this order:
@@ -1031,16 +1072,25 @@ This order gives an early usable product before adding the riskiest integrations
 
 For the AI-driven expansion, build in this order:
 
-1. Phase 11: Model provider layer
-2. Phase 13: Live search and AI evidence extraction
-3. Phase 16: AI-assisted knowledge merge
-4. Phase 12: AI-assisted requirement normalization
-5. Phase 14: AI verification planning
-6. Phase 17: Feishu update and publication sync
-7. Phase 18: AI safety, evaluation, and observability
-8. Phase 15: AI-driven computer use runtime
+Completed or underway:
 
-This order improves research and merge quality before adding autonomous UI execution, which has the highest operational risk.
+1. Phase 11: Model provider layer.
+2. Phase 12: AI-assisted requirement normalization.
+3. Phase 13A: Live search provider boundary and fetched page artifacts.
+4. Phase 14A: Explicit AI verification planning strategy.
+
+Near-term order:
+
+1. Phase 13B: Structured `EvidenceClaim` extraction from fetched documents.
+2. Phase 13C: Source freshness, caveat metadata, and conflict detection.
+3. Phase 15A: `KnowledgeMergeProposal` schema and deterministic section-level merge proposal.
+4. Phase 15B: AI-assisted section-level merge with evidence URL requirements.
+5. Phase 16A: `veriknow inspect <run_id>` and redaction utilities for reviewing model/tool artifacts.
+6. Phase 17: Feishu update and publication sync.
+7. Phase 16B: replay/evaluation fixtures for claim extraction, merge quality, and safety checks.
+8. Phase 18: AI-driven computer-use runtime.
+
+This order improves evidence quality and reviewability before adding autonomous UI execution, which has the highest operational risk.
 
 ## First Sprint
 
@@ -1109,12 +1159,12 @@ These can be added after the local workflow is reliable.
 
 ## Immediate Next Step
 
-Start the AI-driven expansion without weakening the completed local workflow:
+Finish Phase 13 before starting AI merge work:
 
-1. Add the model provider layer with a deterministic stub and one OpenAI-compatible provider.
-2. Add live web-search provider configuration while keeping the static provider as the default test backend.
-3. Extend evidence artifacts with fetched pages, extracted claims, source freshness, and conflict records.
-4. Add AI-assisted curation that produces section-level `KnowledgeMergeProposal` records and reviewable diffs.
-5. Add Feishu document mapping and update mode after local merge remains reliable.
-6. Connect the computer-use boundary to a real runtime only after safety, logging, and replay tests are in place.
+1. Add an `EvidenceClaim` schema with source URL, source title, quote, freshness, caveats, confidence, and conflict fields.
+2. Write `extracted_claims.json` from fetched documents, with a deterministic extractor first and an AI extractor behind `--strategy ai`.
+3. Feed extracted claims into `evidence.json` summaries without breaking the existing `EvidenceBundle.items` contract.
+4. Add conflict detection across claims from different sources and persist `claim_conflicts.json` when conflicts exist.
+5. Update `veriknow plan --strategy ai` context to include extracted claims when available.
+6. Start Phase 15 only after claim artifacts are stable and covered by tests.
 7. Keep all knowledge updates behind patch review and explicit apply.

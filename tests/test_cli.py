@@ -129,6 +129,78 @@ class CliTests(unittest.TestCase):
             self.assertIn("confidence", output["items"][0])
             self.assertTrue((tmp_path / "data" / "runs").exists())
 
+    def test_research_command_writes_fetched_documents_when_enabled(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from veriknow.schemas import FetchedDocument
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "search_fetch_pages: true",
+                        "search_store_raw_pages: true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            def fake_fetch_documents(items, *, limit=None, raw_dir=None):
+                return [
+                    FetchedDocument(
+                        url=items[0].url,
+                        title=items[0].title,
+                        text="Fetched page text. Version 2.0 supports tool calling.",
+                        fetched_at="2026-06-26T00:00:00+00:00",
+                        status_code=200,
+                        content_hash="hash-1",
+                        raw_path=str(raw_dir / "example.html") if raw_dir is not None else None,
+                    )
+                ]
+
+            with patch("veriknow.cli.fetch_documents", fake_fetch_documents):
+                with redirect_stdout(stdout):
+                    main(["research", "LangChain multi-agent supervisor workflow", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            run_dir = tmp_path / "data" / "runs" / output["task_id"]
+            fetched_path = run_dir / "fetched_documents.json"
+            claims_path = run_dir / "extracted_claims.json"
+            fetched = json.loads(fetched_path.read_text(encoding="utf-8"))
+            claims = json.loads(claims_path.read_text(encoding="utf-8"))
+            self.assertTrue(fetched_path.exists())
+            self.assertTrue(claims_path.exists())
+            self.assertEqual(fetched[0]["status_code"], 200)
+            self.assertEqual(fetched[0]["content_hash"], "hash-1")
+            self.assertTrue(fetched[0]["raw_path"].endswith("raw_pages\\example.html"))
+            self.assertEqual(claims[0]["source_url"], fetched[0]["url"])
+            self.assertIn("Version 2.0", claims[1]["text"])
+
+    def test_research_command_brave_provider_requires_key(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "search_provider: brave",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit):
+                main(["research", "LangChain", "--config", str(config_path)])
+
     def test_research_command_ai_strategy_writes_artifact_on_fallback(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -336,6 +408,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("expected_result", output["steps"][0])
             self.assertTrue((run_dir / "verification_plan.json").exists())
             self.assertTrue((run_dir / "verification_checklist.md").exists())
+
+    def test_plan_command_ai_strategy_writes_artifact_on_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: stub",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            research_stdout = StringIO()
+            with redirect_stdout(research_stdout):
+                main(["research", "LangChain multi-agent supervisor workflow", "--config", str(config_path)])
+            run_id = json.loads(research_stdout.getvalue())["task_id"]
+
+            plan_stdout = StringIO()
+            with redirect_stdout(plan_stdout):
+                main(["plan", run_id, "--strategy", "ai", "--config", str(config_path)])
+
+            output = json.loads(plan_stdout.getvalue())
+            run_dir = tmp_path / "data" / "runs" / run_id
+            artifact_path = run_dir / "llm" / "planner.json"
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(output["task_id"], run_id)
+            self.assertTrue(output["steps"])
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact["strategy"], "ai")
+            self.assertEqual(artifact["status"], "fallback")
+            self.assertTrue(artifact["fallback_used"])
 
     def test_verify_command_creates_verification_artifact(self) -> None:
         from tempfile import TemporaryDirectory

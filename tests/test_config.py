@@ -32,6 +32,11 @@ class ConfigTests(unittest.TestCase):
                         "model_timeout_seconds: 12",
                         "model_max_output_tokens: 256",
                         "model_store_prompts: false",
+                        "search_provider: brave",
+                        "search_api_key_env: TEST_SEARCH_KEY",
+                        "search_result_limit: 8",
+                        "search_fetch_pages: true",
+                        "search_store_raw_pages: true",
                     ]
                 ),
                 encoding="utf-8",
@@ -62,4 +67,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.model_timeout_seconds, 12)
             self.assertEqual(config.model_max_output_tokens, 256)
             self.assertFalse(config.model_store_prompts)
+            self.assertEqual(config.search_provider, "brave")
+            self.assertEqual(config.search_api_key_env, "TEST_SEARCH_KEY")
+            self.assertEqual(config.search_result_limit, 8)
+            self.assertTrue(config.search_fetch_pages)
+            self.assertTrue(config.search_store_raw_pages)
 

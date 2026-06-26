@@ -12,13 +12,16 @@ from veriknow.modules.adaptive_profile import AdaptiveProfile
 from veriknow.modules.curator import KnowledgeCurator, load_knowledge_patch
 from veriknow.modules.knowledge import MarkdownKnowledgeIndex, title_from_markdown
 from veriknow.modules.normalizer import AIRequirementNormalizer, RequirementNormalizer, SUPPORTED_NORMALIZER_STRATEGIES
-from veriknow.modules.planner import VerificationPlanner, render_verification_checklist
+from veriknow.modules.planner import AIVerificationPlanner, SUPPORTED_PLANNING_STRATEGIES, VerificationPlanner, render_verification_checklist
 from veriknow.modules.publisher import publish_document
 from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESEARCH_STRATEGIES
 from veriknow.modules.verifier import Verifier
 from veriknow.schemas import EvidenceBundle, VerificationPlan
+from veriknow.tools.claims import extract_claims
 from veriknow.tools.computer_use import ComputerUseSafetyConfig, ComputerUseVerifier
+from veriknow.tools.web_fetch import fetch_documents
 from veriknow.tools.markdown import write_report
+from veriknow.tools.web_search import SearchProviderError, create_search_provider
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -30,7 +33,7 @@ def main(argv: list[str] | None = None) -> None:
     namespace = parser.parse_args(args)
     try:
         namespace.handler(namespace)
-    except (KeyError, ValueError) as exc:
+    except (KeyError, SearchProviderError, ValueError) as exc:
         parser.exit(2, f"veriknow: error: {exc}\n")
 
 
@@ -61,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     research_parser = subparsers.add_parser("research", help="Collect public evidence for a task.")
     research_parser.add_argument("query", nargs="?", help="Research query. Required unless --run-id is used.")
     research_parser.add_argument("--run-id", help="Research an existing run instead of creating a new one.")
-    research_parser.add_argument("--limit", type=int, default=5, help="Maximum number of sources to keep.")
+    research_parser.add_argument("--limit", type=int, default=None, help="Maximum number of sources to keep.")
+    research_parser.add_argument("--search-provider", help="Search provider override, such as static or brave.")
     research_parser.add_argument(
         "--strategy",
         choices=sorted(SUPPORTED_RESEARCH_STRATEGIES),
@@ -73,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan_parser = subparsers.add_parser("plan", help="Generate a verification plan for a run.")
     plan_parser.add_argument("run_id")
+    plan_parser.add_argument(
+        "--strategy",
+        choices=sorted(SUPPORTED_PLANNING_STRATEGIES),
+        default="deterministic",
+        help="Verification planning strategy.",
+    )
     plan_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     plan_parser.set_defaults(handler=handle_plan)
 
@@ -230,13 +240,20 @@ def handle_research(args: argparse.Namespace) -> None:
         task = RequirementNormalizer(config).normalize(args.query)
         record = store.create_run(args.query, task)
 
+    limit = args.limit or config.search_result_limit
+    search_provider = create_search_provider(config, provider=args.search_provider)
+    researcher = Researcher(search_provider)
     research_artifact = None
     if args.strategy == "ai":
-        result = AIResearcher(create_llm_client(config)).research(record.task, run_id=record.run_id, limit=args.limit)
+        result = AIResearcher(create_llm_client(config), base=researcher).research(
+            record.task,
+            run_id=record.run_id,
+            limit=limit,
+        )
         bundle = result.bundle
         research_artifact = result.artifact
     else:
-        bundle = Researcher().research(record.task, run_id=record.run_id, limit=args.limit)
+        bundle = researcher.research(record.task, run_id=record.run_id, limit=limit)
 
     evidence_path = store.run_dir(record.run_id) / "evidence.json"
     evidence_path.write_text(
@@ -253,6 +270,22 @@ def handle_research(args: argparse.Namespace) -> None:
         "evidence": str(evidence_path),
         "related_knowledge": str(related_path),
     }
+    if config.search_fetch_pages:
+        raw_dir = store.run_dir(record.run_id) / "raw_pages" if config.search_store_raw_pages else None
+        fetched = fetch_documents(bundle.items, limit=limit, raw_dir=raw_dir)
+        fetched_path = store.run_dir(record.run_id) / "fetched_documents.json"
+        fetched_path.write_text(
+            json.dumps([document.to_dict() for document in fetched], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["fetched_documents"] = str(fetched_path)
+        claims = extract_claims(fetched)
+        claims_path = store.run_dir(record.run_id) / "extracted_claims.json"
+        claims_path.write_text(
+            json.dumps([claim.to_dict() for claim in claims], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["extracted_claims"] = str(claims_path)
     if research_artifact is not None:
         artifact_path = _write_llm_artifact(store.run_dir(record.run_id), "research", research_artifact.to_dict())
         artifacts["llm_research"] = str(artifact_path)
@@ -269,7 +302,13 @@ def handle_plan(args: argparse.Namespace) -> None:
         raise KeyError(f"run not found: {args.run_id}")
 
     evidence = _load_evidence(record.artifacts.get("evidence"))
-    plan = VerificationPlanner().plan(record.task, evidence, run_id=record.run_id)
+    plan_artifact = None
+    if args.strategy == "ai":
+        result = AIVerificationPlanner(create_llm_client(config)).plan(record.task, evidence, run_id=record.run_id)
+        plan = result.plan
+        plan_artifact = result.artifact
+    else:
+        plan = VerificationPlanner().plan(record.task, evidence, run_id=record.run_id)
     run_dir = store.run_dir(record.run_id)
     plan_path = run_dir / "verification_plan.json"
     checklist_path = run_dir / "verification_checklist.md"
@@ -278,13 +317,17 @@ def handle_plan(args: argparse.Namespace) -> None:
         encoding="utf-8",
     )
     checklist_path.write_text(render_verification_checklist(plan), encoding="utf-8")
+    artifacts = {
+        "verification_plan": str(plan_path),
+        "verification_checklist": str(checklist_path),
+    }
+    if plan_artifact is not None:
+        artifact_path = _write_llm_artifact(run_dir, "planner", plan_artifact.to_dict())
+        artifacts["llm_planner"] = str(artifact_path)
     store.update_run(
         record.run_id,
         status="planned",
-        artifacts={
-            "verification_plan": str(plan_path),
-            "verification_checklist": str(checklist_path),
-        },
+        artifacts=artifacts,
     )
     print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
 
@@ -498,7 +541,7 @@ def handle_reverify(args: argparse.Namespace) -> None:
     run_id = record.run_id
     run_dir = store.run_dir(record.run_id)
 
-    bundle = Researcher().research(record.task, run_id=record.run_id, limit=args.limit)
+    bundle = Researcher(create_search_provider(config)).research(record.task, run_id=record.run_id, limit=args.limit)
     evidence_path = run_dir / "evidence.json"
     evidence_path.write_text(
         json.dumps(bundle.to_dict(), ensure_ascii=False, indent=2),

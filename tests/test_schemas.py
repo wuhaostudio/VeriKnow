@@ -1,6 +1,6 @@
 import unittest
 
-from veriknow.schemas import EvidenceItem, PublicationJob, RunRecord, TaskSpec, VerificationResult
+from veriknow.schemas import EvidenceClaim, EvidenceItem, FetchedDocument, PublicationJob, RunRecord, TaskSpec, VerificationResult
 
 
 class SchemaTests(unittest.TestCase):
@@ -43,6 +43,44 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(loaded.target_document_id, "doc-1")
         self.assertEqual(loaded.target_url, "https://example.feishu.cn/docx/doc-1")
         self.assertEqual(loaded.error_code, "missing_credentials")
+
+    def test_evidence_claim_round_trip(self) -> None:
+        claim = EvidenceClaim(
+            text="The API supports tool calling in version 2.0.",
+            source_url="https://example.com/docs",
+            source_title="Example Docs",
+            quote="The API supports tool calling in version 2.0.",
+            source_type="official_doc",
+            confidence="high",
+            freshness="dated",
+            caveats=["version-specific"],
+            conflicts=["Older source says unsupported."],
+        )
+
+        loaded = EvidenceClaim.from_dict(claim.to_dict())
+
+        self.assertEqual(loaded.text, claim.text)
+        self.assertEqual(loaded.source_url, claim.source_url)
+        self.assertEqual(loaded.caveats, ["version-specific"])
+        self.assertEqual(loaded.conflicts, ["Older source says unsupported."])
+
+    def test_fetched_document_round_trip(self) -> None:
+        document = FetchedDocument(
+            url="https://example.com/docs",
+            title="Example Docs",
+            text="Readable documentation text.",
+            fetched_at="2026-06-26T00:00:00+00:00",
+            status_code=200,
+            content_hash="abc123",
+            raw_path="data/runs/run-test/raw_pages/example.html",
+        )
+
+        loaded = FetchedDocument.from_dict(document.to_dict())
+
+        self.assertEqual(loaded.url, document.url)
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.content_hash, "abc123")
+        self.assertEqual(loaded.raw_path, "data/runs/run-test/raw_pages/example.html")
 
     def test_verification_result_round_trip_with_actions(self) -> None:
         result = VerificationResult(

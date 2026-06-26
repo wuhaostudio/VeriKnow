@@ -6,7 +6,7 @@ from veriknow.config import Config
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.normalizer import RequirementNormalizer
 from veriknow.modules.researcher import AIResearcher, Researcher
-from veriknow.tools.web_search import SearchResult, WebSearchProvider
+from veriknow.tools.web_search import BraveSearchProvider, SearchProviderError, SearchResult, create_search_provider, WebSearchProvider
 
 
 class FakeProvider(WebSearchProvider):
@@ -70,6 +70,69 @@ class ResearcherTests(unittest.TestCase):
             self.assertEqual(loaded.status, "researched")
             self.assertTrue(evidence_path.exists())
             self.assertEqual(loaded.artifacts["evidence"], str(evidence_path))
+
+    def test_create_search_provider_uses_static_by_default(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+            )
+            provider = create_search_provider(config)
+            results = provider.search("LangChain", limit=1)
+
+            self.assertEqual(len(results), 1)
+            self.assertIn("LangChain", results[0].title)
+
+    def test_brave_search_provider_maps_web_results(self) -> None:
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "web": {
+                            "results": [
+                                {
+                                    "title": "Official docs",
+                                    "url": "https://docs.example.com/guide",
+                                    "description": "Official guide.",
+                                    "age": "2026-01-01",
+                                }
+                            ]
+                        }
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            calls.append((request, timeout))
+            return FakeResponse()
+
+        import unittest.mock
+
+        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+            results = BraveSearchProvider("search-key", timeout_seconds=3).search("example query", limit=2)
+
+        self.assertEqual(results[0].title, "Official docs")
+        self.assertEqual(results[0].source_type, "official_doc")
+        self.assertIn("q=example+query", calls[0][0].full_url)
+        self.assertEqual(calls[0][0].headers["X-subscription-token"], "search-key")
+        self.assertEqual(calls[0][1], 3)
+
+    def test_brave_search_provider_requires_key(self) -> None:
+        with self.assertRaises(SearchProviderError) as context:
+            BraveSearchProvider("")
+
+        self.assertEqual(context.exception.code, "missing_api_key")
+
 
 class FakeResearchLLM:
     provider = "fake"

@@ -74,6 +74,40 @@ class EvidenceBundle(JsonModel):
     created_at: str = field(default_factory=now_iso)
 
 
+
+
+@dataclass
+class EvidenceClaim(JsonModel):
+    required_fields: ClassVar[tuple[str, ...]] = ("text", "source_url")
+
+    text: str
+    source_url: str
+    source_title: str = ""
+    quote: str = ""
+    source_type: str = "unknown"
+    published_at: str | None = None
+    updated_at: str | None = None
+    confidence: str = "medium"
+    freshness: str = "unknown"
+    caveats: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FetchedDocument(JsonModel):
+    required_fields: ClassVar[tuple[str, ...]] = ("url", "fetched_at")
+
+    url: str
+    title: str = ""
+    text: str = ""
+    fetched_at: str = field(default_factory=now_iso)
+    status_code: int = 0
+    content_hash: str = ""
+    raw_path: str | None = None
+    error_code: str | None = None
+    message: str = ""
+
+
 @dataclass
 class VerificationStep(JsonModel):
     required_fields: ClassVar[tuple[str, ...]] = ("description", "expected_result")

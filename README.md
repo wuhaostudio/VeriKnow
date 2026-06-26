@@ -92,13 +92,19 @@ Collect public evidence:
 
 ```bash
 veriknow research "LangChain multi-agent supervisor workflow"
+veriknow research "latest OpenAI Responses API tool calling" --search-provider brave
 ```
+
+Brave search requires an API key in `BRAVE_SEARCH_API_KEY` by default, or in the environment variable named by `search_api_key_env`. When `search_fetch_pages` is enabled, research also writes normalized page text to `data/runs/<run_id>/fetched_documents.json` and deterministic claims to `data/runs/<run_id>/extracted_claims.json`; with `search_store_raw_pages`, each fetched document records its raw HTML path.
 
 Generate a verification plan:
 
 ```bash
 veriknow plan <run_id>
+veriknow plan <run_id> --strategy ai
 ```
+
+AI planning stores its prompt, seed plan, model output, fallback status, and validated plan under `data/runs/<run_id>/llm/planner.json`.
 
 Run browser verification:
 
@@ -201,6 +207,31 @@ Scheduled re-verification:
 default_reverify_interval_days: 30
 ```
 
+Search provider keys:
+
+```yaml
+search_provider: "static"
+search_api_key_env: ""
+search_result_limit: 5
+search_fetch_pages: false
+search_store_raw_pages: false
+```
+
+Set `search_provider` to `brave` for live search. Set `search_fetch_pages` to `true` to store normalized fetched page text, and set `search_store_raw_pages` to `true` to also retain raw HTML under `data/runs/<run_id>/raw_pages/`.
+
+Model provider keys:
+
+```yaml
+model_provider: "zhipu"
+model_name: "glm-5.2"
+model_api_key_env: "ZHIPUAI_API_KEY"
+model_base_url: "https://open.bigmodel.cn/api/paas/v4"
+model_temperature: 0
+model_timeout_seconds: 60
+model_max_output_tokens: 4000
+model_store_prompts: true
+```
+
 Optional Feishu publisher keys:
 
 ```yaml
@@ -226,6 +257,8 @@ data/
     <run_id>/
       task.json
       evidence.json
+      fetched_documents.json
+      extracted_claims.json
       verification_plan.json
       verification_checklist.md
       verification.json
@@ -287,7 +320,7 @@ UserProfile         task-relevant user preferences
 
 ## Project Status
 
-The local-first MVP workflow is complete and covered by tests. The current build uses a deterministic static search provider for repeatable local runs.
+The local-first MVP workflow is complete and covered by tests. The current build uses a deterministic static search provider by default, an optional Brave live-search provider, and optional AI-assisted normalization, research extraction, and verification planning behind explicit strategy flags.
 
 `DEVELOPMENT_PLAN.md` is retained as implementation history and a maintenance roadmap. It is not required for installing or running the project.
 

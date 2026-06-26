@@ -30,6 +30,11 @@ DEFAULT_CONFIG = {
     "model_timeout_seconds": 60,
     "model_max_output_tokens": 4000,
     "model_store_prompts": True,
+    "search_provider": "static",
+    "search_api_key_env": "",
+    "search_result_limit": 5,
+    "search_fetch_pages": False,
+    "search_store_raw_pages": False,
 }
 
 
@@ -56,6 +61,11 @@ class Config:
     model_timeout_seconds: int = 60
     model_max_output_tokens: int = 4000
     model_store_prompts: bool = True
+    search_provider: str = "static"
+    search_api_key_env: str = ""
+    search_result_limit: int = 5
+    search_fetch_pages: bool = False
+    search_store_raw_pages: bool = False
 
     @property
     def runs_dir(self) -> Path:
@@ -134,6 +144,15 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         model_store_prompts=_parse_bool(
             values.get("model_store_prompts", DEFAULT_CONFIG["model_store_prompts"])
+        ),
+        search_provider=str(values.get("search_provider", DEFAULT_CONFIG["search_provider"])),
+        search_api_key_env=str(values.get("search_api_key_env", DEFAULT_CONFIG["search_api_key_env"])),
+        search_result_limit=int(values.get("search_result_limit", DEFAULT_CONFIG["search_result_limit"])),
+        search_fetch_pages=_parse_bool(
+            values.get("search_fetch_pages", DEFAULT_CONFIG["search_fetch_pages"])
+        ),
+        search_store_raw_pages=_parse_bool(
+            values.get("search_store_raw_pages", DEFAULT_CONFIG["search_store_raw_pages"])
         ),
     )
 
