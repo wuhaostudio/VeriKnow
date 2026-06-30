@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from veriknow.llm import LLMClient, LLMProviderError
-from veriknow.schemas import EvidenceBundle, EvidenceItem, TaskSpec, VerificationPlan, VerificationStep
+from veriknow.schemas import EvidenceBundle, EvidenceClaim, EvidenceItem, TaskSpec, VerificationPlan, VerificationStep
 
 
 RISK_TERMS = {
@@ -155,11 +155,22 @@ class AIVerificationPlanner:
         evidence: EvidenceBundle | None,
         *,
         run_id: str,
+        claims: list[EvidenceClaim] | None = None,
+        claim_conflicts: list[dict[str, Any]] | None = None,
     ) -> PlanningResult:
         seed = self.base.plan(task, evidence, run_id=run_id)
         prompt = self._prompt_for(task)
         try:
-            output = self.llm.generate_json(prompt, context=self._context_for(task, evidence, seed))
+            output = self.llm.generate_json(
+                prompt,
+                context=self._context_for(
+                    task,
+                    evidence,
+                    seed,
+                    claims=claims,
+                    claim_conflicts=claim_conflicts,
+                ),
+            )
             plan = self._plan_from_output(output, run_id=run_id)
             artifact = PlanningArtifact(
                 strategy="ai",
@@ -194,7 +205,7 @@ class AIVerificationPlanner:
             "Create a VeriKnow VerificationPlan JSON object from the supplied task and seed plan. "
             "Return fields: steps. Each step must include description, expected_result, method, "
             "tools, screenshot_required, requires_approval. Allowed methods are browser, api, cli, manual, computer-use. "
-            "Browser and computer-use steps must include a concrete http or https source URL in the description or expected_result. Prefer steps that are directly testable and that preserve approval gates for risky actions."
+            "Browser and computer-use steps must include a concrete http or https source URL in the description or expected_result. Use extracted_claims and claim_conflicts when present, and add manual checkpoints for unresolved conflicts. Prefer steps that are directly testable and that preserve approval gates for risky actions."
         )
 
     def _context_for(
@@ -202,11 +213,15 @@ class AIVerificationPlanner:
         task: TaskSpec,
         evidence: EvidenceBundle | None,
         seed: VerificationPlan,
+        claims: list[EvidenceClaim] | None = None,
+        claim_conflicts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return {
             "task": task.to_dict(),
             "evidence": evidence.to_dict() if evidence is not None else None,
             "seed_plan": seed.to_dict(),
+            "extracted_claims": [claim.to_dict() for claim in claims or []],
+            "claim_conflicts": claim_conflicts or [],
         }
 
     def _plan_from_output(self, output: dict[str, Any], *, run_id: str) -> VerificationPlan:

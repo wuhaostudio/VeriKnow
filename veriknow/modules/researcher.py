@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
 from veriknow.llm import LLMClient, LLMProviderError
-from veriknow.schemas import EvidenceBundle, EvidenceItem, TaskSpec
+from veriknow.schemas import EvidenceBundle, EvidenceClaim, EvidenceItem, TaskSpec
 from veriknow.tools.web_search import SearchResult, StaticSeedSearchProvider, WebSearchProvider
 
 
@@ -216,6 +216,25 @@ def summary_for_evidence(task: TaskSpec, items: list[EvidenceItem]) -> str:
         f"{high_confidence_count} high-confidence source(s)."
     )
 
+
+def add_claim_summary(
+    summary: str,
+    claims: list[EvidenceClaim],
+    *,
+    conflict_count: int = 0,
+) -> str:
+    if not claims:
+        return f"{summary} No extracted claims were available from fetched pages."
+
+    source_count = len({claim.source_url for claim in claims})
+    dated_count = sum(1 for claim in claims if claim.freshness == "dated")
+    caveat_count = sum(1 for claim in claims if claim.caveats)
+    claim_summary = (
+        f" Extracted {len(claims)} claim(s) from {source_count} fetched source(s); "
+        f"{dated_count} dated claim(s); {caveat_count} claim(s) with caveats; "
+        f"{conflict_count} detected conflict(s)."
+    )
+    return f"{summary}{claim_summary}"
 
 def _optional_string(value: Any) -> str | None:
     if value is None:

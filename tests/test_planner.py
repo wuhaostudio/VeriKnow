@@ -1,7 +1,7 @@
 import unittest
 
 from veriknow.modules.planner import AIVerificationPlanner, VerificationPlanner, render_verification_checklist
-from veriknow.schemas import EvidenceBundle, EvidenceItem, TaskSpec
+from veriknow.schemas import EvidenceBundle, EvidenceClaim, EvidenceItem, TaskSpec
 
 
 class PlannerTests(unittest.TestCase):
@@ -72,6 +72,7 @@ class FakePlannerLLM:
 
     def __init__(self, payload: dict):
         self.payload = payload
+        self.context = None
 
     def check(self):
         raise NotImplementedError
@@ -80,6 +81,7 @@ class FakePlannerLLM:
         raise NotImplementedError
 
     def generate_json(self, prompt: str, *, context: dict | None = None) -> dict:
+        self.context = context
         return self.payload
 
     def classify(self, prompt: str, labels: list[str], *, context: dict | None = None) -> str:
@@ -201,3 +203,56 @@ class AIPlannerTests(unittest.TestCase):
         self.assertEqual(result.artifact.status, "fallback")
         self.assertEqual(result.artifact.error_code, "ValueError")
         self.assertIn("source URL", result.artifact.message)
+
+    def test_ai_planner_context_includes_extracted_claims_and_conflicts(self) -> None:
+        task = TaskSpec(
+            raw_request="Research latest LangChain workflow",
+            objective="Research",
+            target="LangChain workflow",
+            verification_required=True,
+            verification_method="browser",
+        )
+        evidence = EvidenceBundle(
+            task_id="run-test",
+            items=[
+                EvidenceItem(
+                    title="Official docs",
+                    url="https://example.com/docs",
+                    source_type="official_doc",
+                    snippet="Official documentation for the workflow.",
+                    confidence="high",
+                )
+            ],
+        )
+        claim = EvidenceClaim(
+            text="The workflow supports supervisor routing.",
+            source_url="https://example.com/docs",
+            source_title="Official docs",
+        )
+        conflict = {"topic": "workflow", "reason": "opposing claims"}
+        llm = FakePlannerLLM(
+            {
+                "steps": [
+                    {
+                        "description": "Open the official docs page.",
+                        "expected_result": "The page loads successfully at https://example.com/docs.",
+                        "method": "browser",
+                        "tools": ["browser"],
+                        "screenshot_required": True,
+                        "requires_approval": False,
+                    }
+                ]
+            }
+        )
+
+        AIVerificationPlanner(llm).plan(
+            task,
+            evidence,
+            run_id="run-ai",
+            claims=[claim],
+            claim_conflicts=[conflict],
+        )
+
+        self.assertIsNotNone(llm.context)
+        self.assertEqual(llm.context["extracted_claims"][0]["text"], claim.text)
+        self.assertEqual(llm.context["claim_conflicts"], [conflict])

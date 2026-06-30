@@ -14,10 +14,10 @@ from veriknow.modules.knowledge import MarkdownKnowledgeIndex, title_from_markdo
 from veriknow.modules.normalizer import AIRequirementNormalizer, RequirementNormalizer, SUPPORTED_NORMALIZER_STRATEGIES
 from veriknow.modules.planner import AIVerificationPlanner, SUPPORTED_PLANNING_STRATEGIES, VerificationPlanner, render_verification_checklist
 from veriknow.modules.publisher import publish_document
-from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESEARCH_STRATEGIES
+from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESEARCH_STRATEGIES, add_claim_summary
 from veriknow.modules.verifier import Verifier
-from veriknow.schemas import EvidenceBundle, VerificationPlan
-from veriknow.tools.claims import extract_claims
+from veriknow.schemas import EvidenceBundle, EvidenceClaim, VerificationPlan
+from veriknow.tools.claims import AIClaimExtractor, detect_claim_conflicts, extract_claims
 from veriknow.tools.computer_use import ComputerUseSafetyConfig, ComputerUseVerifier
 from veriknow.tools.web_fetch import fetch_documents
 from veriknow.tools.markdown import write_report
@@ -255,7 +255,48 @@ def handle_research(args: argparse.Namespace) -> None:
     else:
         bundle = researcher.research(record.task, run_id=record.run_id, limit=limit)
 
-    evidence_path = store.run_dir(record.run_id) / "evidence.json"
+    run_dir = store.run_dir(record.run_id)
+    evidence_path = run_dir / "evidence.json"
+    artifacts = {}
+    if config.search_fetch_pages:
+        raw_dir = run_dir / "raw_pages" if config.search_store_raw_pages else None
+        fetched = fetch_documents(bundle.items, limit=limit, raw_dir=raw_dir)
+        fetched_path = run_dir / "fetched_documents.json"
+        fetched_path.write_text(
+            json.dumps([document.to_dict() for document in fetched], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["fetched_documents"] = str(fetched_path)
+        claim_artifact = None
+        if args.strategy == "ai":
+            claim_result = AIClaimExtractor(create_llm_client(config)).extract(fetched)
+            claims = claim_result.claims
+            claim_artifact = claim_result.artifact
+        else:
+            claims = extract_claims(fetched)
+        claim_conflicts = detect_claim_conflicts(claims)
+        if claim_artifact is not None:
+            artifact_path = _write_llm_artifact(run_dir, "claim_extractor", claim_artifact.to_dict())
+            artifacts["llm_claim_extractor"] = str(artifact_path)
+        bundle.summary = add_claim_summary(
+            bundle.summary,
+            claims,
+            conflict_count=len(claim_conflicts),
+        )
+        claims_path = run_dir / "extracted_claims.json"
+        claims_path.write_text(
+            json.dumps([claim.to_dict() for claim in claims], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["extracted_claims"] = str(claims_path)
+        if claim_conflicts:
+            conflicts_path = run_dir / "claim_conflicts.json"
+            conflicts_path.write_text(
+                json.dumps([conflict.to_dict() for conflict in claim_conflicts], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            artifacts["claim_conflicts"] = str(conflicts_path)
+
     evidence_path.write_text(
         json.dumps(bundle.to_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -263,29 +304,15 @@ def handle_research(args: argparse.Namespace) -> None:
     related_path = _write_related_knowledge(
         record,
         config,
-        store.run_dir(record.run_id),
+        run_dir,
         extra_text=bundle.summary,
     )
-    artifacts = {
-        "evidence": str(evidence_path),
-        "related_knowledge": str(related_path),
-    }
-    if config.search_fetch_pages:
-        raw_dir = store.run_dir(record.run_id) / "raw_pages" if config.search_store_raw_pages else None
-        fetched = fetch_documents(bundle.items, limit=limit, raw_dir=raw_dir)
-        fetched_path = store.run_dir(record.run_id) / "fetched_documents.json"
-        fetched_path.write_text(
-            json.dumps([document.to_dict() for document in fetched], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        artifacts["fetched_documents"] = str(fetched_path)
-        claims = extract_claims(fetched)
-        claims_path = store.run_dir(record.run_id) / "extracted_claims.json"
-        claims_path.write_text(
-            json.dumps([claim.to_dict() for claim in claims], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        artifacts["extracted_claims"] = str(claims_path)
+    artifacts.update(
+        {
+            "evidence": str(evidence_path),
+            "related_knowledge": str(related_path),
+        }
+    )
     if research_artifact is not None:
         artifact_path = _write_llm_artifact(store.run_dir(record.run_id), "research", research_artifact.to_dict())
         artifacts["llm_research"] = str(artifact_path)
@@ -302,9 +329,17 @@ def handle_plan(args: argparse.Namespace) -> None:
         raise KeyError(f"run not found: {args.run_id}")
 
     evidence = _load_evidence(record.artifacts.get("evidence"))
+    claims = _load_claims(record.artifacts.get("extracted_claims"))
+    claim_conflicts = _load_json_list(record.artifacts.get("claim_conflicts"))
     plan_artifact = None
     if args.strategy == "ai":
-        result = AIVerificationPlanner(create_llm_client(config)).plan(record.task, evidence, run_id=record.run_id)
+        result = AIVerificationPlanner(create_llm_client(config)).plan(
+            record.task,
+            evidence,
+            run_id=record.run_id,
+            claims=claims,
+            claim_conflicts=claim_conflicts,
+        )
         plan = result.plan
         plan_artifact = result.artifact
     else:
@@ -651,6 +686,31 @@ def _load_evidence(path: str | None) -> EvidenceBundle | None:
         return EvidenceBundle.from_dict(json.load(file))
 
 
+def _load_claims(path: str | None) -> list[EvidenceClaim]:
+    if not path:
+        return []
+    claims_path = Path(path)
+    if not claims_path.exists():
+        return []
+    with claims_path.open(encoding="utf-8") as file:
+        raw_claims = json.load(file)
+    if not isinstance(raw_claims, list):
+        return []
+    return [EvidenceClaim.from_dict(item) for item in raw_claims if isinstance(item, dict)]
+
+
+def _load_json_list(path: str | None) -> list[dict]:
+    if not path:
+        return []
+    json_path = Path(path)
+    if not json_path.exists():
+        return []
+    with json_path.open(encoding="utf-8") as file:
+        value = json.load(file)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
 def _load_plan(path: str | None) -> VerificationPlan | None:
     if not path:
         return None
@@ -692,4 +752,3 @@ def _knowledge_document_path(document_path: str, knowledge_dir: Path) -> Path:
     if path.suffix.lower() != ".md":
         raise ValueError(f"knowledge document must be Markdown: {path}")
     return path
-

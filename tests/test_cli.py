@@ -160,7 +160,15 @@ class CliTests(unittest.TestCase):
                         status_code=200,
                         content_hash="hash-1",
                         raw_path=str(raw_dir / "example.html") if raw_dir is not None else None,
-                    )
+                    ),
+                    FetchedDocument(
+                        url="https://example.com/old",
+                        title="Old Docs",
+                        text="Version 2.0 tool calling is deprecated.",
+                        fetched_at="2026-06-26T00:00:00+00:00",
+                        status_code=200,
+                        content_hash="hash-2",
+                    ),
                 ]
 
             with patch("veriknow.cli.fetch_documents", fake_fetch_documents):
@@ -169,17 +177,27 @@ class CliTests(unittest.TestCase):
 
             output = json.loads(stdout.getvalue())
             run_dir = tmp_path / "data" / "runs" / output["task_id"]
+            evidence_path = run_dir / "evidence.json"
             fetched_path = run_dir / "fetched_documents.json"
             claims_path = run_dir / "extracted_claims.json"
+            conflicts_path = run_dir / "claim_conflicts.json"
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             fetched = json.loads(fetched_path.read_text(encoding="utf-8"))
             claims = json.loads(claims_path.read_text(encoding="utf-8"))
+            conflicts = json.loads(conflicts_path.read_text(encoding="utf-8"))
+            self.assertTrue(evidence_path.exists())
             self.assertTrue(fetched_path.exists())
             self.assertTrue(claims_path.exists())
+            self.assertTrue(conflicts_path.exists())
             self.assertEqual(fetched[0]["status_code"], 200)
             self.assertEqual(fetched[0]["content_hash"], "hash-1")
             self.assertTrue(fetched[0]["raw_path"].endswith("raw_pages\\example.html"))
             self.assertEqual(claims[0]["source_url"], fetched[0]["url"])
             self.assertIn("Version 2.0", claims[1]["text"])
+            self.assertIn("opposing", conflicts[0]["reason"])
+            self.assertTrue(claims[1]["conflicts"])
+            self.assertIn("Extracted 3 claim(s)", evidence["summary"])
+            self.assertIn("1 detected conflict(s)", evidence["summary"])
 
     def test_research_command_brave_provider_requires_key(self) -> None:
         from tempfile import TemporaryDirectory
@@ -239,6 +257,60 @@ class CliTests(unittest.TestCase):
             self.assertEqual(artifact["provider"], "stub")
             self.assertEqual(artifact["status"], "fallback")
             self.assertTrue(artifact["fallback_used"])
+    def test_research_command_ai_claim_extractor_writes_artifact_on_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from veriknow.schemas import FetchedDocument
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: stub",
+                        "search_fetch_pages: true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            def fake_fetch_documents(items, *, limit=None, raw_dir=None):
+                return [
+                    FetchedDocument(
+                        url=items[0].url,
+                        title=items[0].title,
+                        text="Version 2.0 supports tool calling.",
+                        fetched_at="2026-06-26T00:00:00+00:00",
+                        status_code=200,
+                        content_hash="hash-1",
+                    )
+                ]
+
+            with patch("veriknow.cli.fetch_documents", fake_fetch_documents):
+                with redirect_stdout(stdout):
+                    main([
+                        "research",
+                        "LangChain multi-agent supervisor workflow",
+                        "--strategy",
+                        "ai",
+                        "--config",
+                        str(config_path),
+                    ])
+
+            output = json.loads(stdout.getvalue())
+            run_dir = tmp_path / "data" / "runs" / output["task_id"]
+            artifact_path = run_dir / "llm" / "claim_extractor.json"
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact["strategy"], "ai")
+            self.assertEqual(artifact["provider"], "stub")
+            self.assertEqual(artifact["status"], "fallback")
+            self.assertTrue(artifact["fallback_used"])
+            self.assertTrue((run_dir / "extracted_claims.json").exists())
     def test_research_command_writes_related_knowledge_artifact(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -684,4 +756,3 @@ class CliTests(unittest.TestCase):
             self.assertEqual(patch["target_path"], str(knowledge_path))
             self.assertFalse(patch["approved"])
             self.assertEqual(knowledge_path.read_text(encoding="utf-8"), original)
-
