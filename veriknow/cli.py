@@ -258,6 +258,14 @@ def handle_research(args: argparse.Namespace) -> None:
     run_dir = store.run_dir(record.run_id)
     evidence_path = run_dir / "evidence.json"
     artifacts = {}
+    if researcher.last_raw_search_payloads:
+        raw_payloads_path = run_dir / "raw_search_payloads.json"
+        raw_payloads_path.write_text(
+            json.dumps(researcher.last_raw_search_payloads, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["raw_search_payloads"] = str(raw_payloads_path)
+
     if config.search_fetch_pages:
         raw_dir = run_dir / "raw_pages" if config.search_store_raw_pages else None
         fetched = fetch_documents(bundle.items, limit=limit, raw_dir=raw_dir)
@@ -496,7 +504,9 @@ def handle_curate(args: argparse.Namespace) -> None:
     )
     curator = KnowledgeCurator()
     patch = curator.create_patch(record, report_path, config.knowledge_dir)
-    diff_path, patch_path = curator.write_patch_files(patch, store.run_dir(record.run_id))
+    proposal = curator.create_merge_proposal(record, patch, report_path)
+    diff_path, patch_path = curator.write_patch_files(patch, store.run_dir(record.run_id), proposal=proposal)
+    proposal_path = store.run_dir(record.run_id) / "knowledge_merge_proposal.json"
     store.update_run(
         record.run_id,
         status="curated",
@@ -504,6 +514,7 @@ def handle_curate(args: argparse.Namespace) -> None:
             "related_knowledge": str(related_path),
             "patch_diff": str(diff_path),
             "knowledge_patch": str(patch_path),
+            "knowledge_merge_proposal": str(proposal_path),
         },
     )
     print(json.dumps(patch.to_dict(), ensure_ascii=False, indent=2))
@@ -651,19 +662,23 @@ def handle_reverify(args: argparse.Namespace) -> None:
         reverify_interval_days=config.default_reverify_interval_days,
     )
     record = store.update_run(record.run_id, artifacts={"report": str(report_path)})
-    patch = KnowledgeCurator().create_patch_for_target(
+    curator = KnowledgeCurator()
+    patch = curator.create_patch_for_target(
         record,
         report_path,
         document_path,
         config.knowledge_dir,
     )
-    diff_path, patch_path = KnowledgeCurator().write_patch_files(patch, run_dir)
+    proposal = curator.create_merge_proposal(record, patch, report_path)
+    diff_path, patch_path = curator.write_patch_files(patch, run_dir, proposal=proposal)
+    proposal_path = run_dir / "knowledge_merge_proposal.json"
     record = store.update_run(
         record.run_id,
         status="reverify_curated",
         artifacts={
             "patch_diff": str(diff_path),
             "knowledge_patch": str(patch_path),
+            "knowledge_merge_proposal": str(proposal_path),
         },
     )
     print(json.dumps(record.to_dict(), ensure_ascii=False, indent=2))

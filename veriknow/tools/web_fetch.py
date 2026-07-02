@@ -86,7 +86,21 @@ def fetch_documents(
 ) -> list[FetchedDocument]:
     selected = items[:limit] if limit is not None else items
     page_fetcher = fetcher or WebPageFetcher(raw_dir=raw_dir)
-    return [page_fetcher.fetch(item.url, title=item.title) for item in selected]
+    documents: list[FetchedDocument] = []
+    for item in selected:
+        document = page_fetcher.fetch(item.url, title=item.title)
+        document.metadata.update(
+            {
+                "source_title": item.title,
+                "source_type": item.source_type,
+                "source_snippet": item.snippet,
+                "published_at": item.published_at,
+                "updated_at": item.updated_at,
+                "confidence": item.confidence,
+            }
+        )
+        documents.append(document)
+    return documents
 
 
 def normalize_html(html: str) -> tuple[str, str]:

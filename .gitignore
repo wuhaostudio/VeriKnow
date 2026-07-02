@@ -8,3 +8,10 @@ venv/
 data/**
 !data/
 !data/.gitkeep
+# Local-only agent and planning files
+AGENTS.md
+DEVELOPMENT_PLAN.md
+DESIGN.md
+PLAN.md
+.codex/
+.agents/

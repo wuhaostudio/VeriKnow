@@ -199,6 +199,48 @@ class CliTests(unittest.TestCase):
             self.assertIn("Extracted 3 claim(s)", evidence["summary"])
             self.assertIn("1 detected conflict(s)", evidence["summary"])
 
+    def test_research_command_writes_raw_search_payloads_when_provider_exposes_them(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from veriknow.tools.web_search import SearchResult
+
+        class RawProvider:
+            def search(self, query: str, *, limit: int = 5):
+                return [
+                    SearchResult(
+                        title="Official docs",
+                        url="https://docs.example.com/guide",
+                        snippet="Official guide.",
+                        source_type="official_doc",
+                        raw={"title": "Official docs", "url": "https://docs.example.com/guide", "age": "2026-01-01"},
+                    )
+                ]
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "search_fetch_pages: false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with patch("veriknow.cli.create_search_provider", return_value=RawProvider()):
+                with redirect_stdout(stdout):
+                    main(["research", "example docs", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            run_dir = tmp_path / "data" / "runs" / output["task_id"]
+            raw_payloads_path = run_dir / "raw_search_payloads.json"
+            raw_payloads = json.loads(raw_payloads_path.read_text(encoding="utf-8"))
+            self.assertTrue(raw_payloads_path.exists())
+            self.assertEqual(raw_payloads[0]["age"], "2026-01-01")
     def test_research_command_brave_provider_requires_key(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -664,6 +706,11 @@ class CliTests(unittest.TestCase):
             self.assertFalse(patch["approved"])
             self.assertTrue((run_dir / "patch.diff").exists())
             self.assertTrue((run_dir / "knowledge_patch.json").exists())
+            proposal_path = run_dir / "knowledge_merge_proposal.json"
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+            self.assertTrue(proposal_path.exists())
+            self.assertEqual(proposal["operation"], "update")
+            self.assertEqual(proposal["target_path"], str(knowledge_path))
             self.assertEqual(knowledge_path.read_text(encoding="utf-8"), "# LangChain Supervisor\n\nOld workflow.\n")
 
             apply_stdout = StringIO()
@@ -752,6 +799,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue((run_dir / "verification.json").exists())
             self.assertTrue((run_dir / "report.md").exists())
             self.assertTrue((run_dir / "knowledge_patch.json").exists())
+            proposal_path = run_dir / "knowledge_merge_proposal.json"
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+            self.assertTrue(proposal_path.exists())
+            self.assertEqual(proposal["operation"], "update")
             patch = json.loads((run_dir / "knowledge_patch.json").read_text(encoding="utf-8"))
             self.assertEqual(patch["target_path"], str(knowledge_path))
             self.assertFalse(patch["approved"])

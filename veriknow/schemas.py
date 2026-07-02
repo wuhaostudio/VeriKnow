@@ -89,6 +89,8 @@ class EvidenceClaim(JsonModel):
     updated_at: str | None = None
     confidence: str = "medium"
     freshness: str = "unknown"
+    source_dates: dict[str, str] = field(default_factory=dict)
+    version_constraints: list[str] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
 
@@ -106,6 +108,7 @@ class FetchedDocument(JsonModel):
     raw_path: str | None = None
     error_code: str | None = None
     message: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -154,6 +157,20 @@ class KnowledgePatch(JsonModel):
     target_path: str
     diff: str
     approved: bool = False
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass
+class KnowledgeMergeProposal(JsonModel):
+    run_id: str
+    operation: str
+    target_path: str
+    target_title: str
+    rationale: str
+    evidence_urls: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+    diff: str = ""
+    risk_level: str = "medium"
     created_at: str = field(default_factory=now_iso)
 
 

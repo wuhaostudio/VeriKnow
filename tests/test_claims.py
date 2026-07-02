@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import unittest
 
 from veriknow.schemas import EvidenceClaim, FetchedDocument
@@ -50,6 +52,48 @@ class ClaimExtractionTests(unittest.TestCase):
         self.assertEqual(claims[1].freshness, "dated")
         self.assertIn("mentions deprecation", claims[2].caveats)
 
+    def test_extract_claims_adds_source_dates_and_version_constraints(self) -> None:
+        document = FetchedDocument(
+            url="https://example.com/docs",
+            title="Example Docs",
+            text=(
+                "Last updated: 2026-06-26. "
+                "Version 2.0 supports tool calling and Python >=3.11 is recommended."
+            ),
+            fetched_at="2026-06-26T00:00:00+00:00",
+            status_code=200,
+            content_hash="hash-1",
+            metadata={
+                "source_type": "official_doc",
+                "published_at": "2026-01-01",
+                "confidence": "high",
+            },
+        )
+
+        claims = extract_claims([document], max_claims_per_document=2)
+
+        self.assertEqual(claims[0].source_dates["published_at"], "2026-01-01")
+        self.assertEqual(claims[0].source_dates["updated_at"], "2026-06-26")
+        self.assertEqual(claims[0].source_type, "official_doc")
+        self.assertEqual(claims[0].confidence, "high")
+        self.assertIn("Version 2.0", claims[1].version_constraints)
+        self.assertIn("Python >=3.11", claims[1].version_constraints)
+
+    def test_phase13_metadata_eval_fixture(self) -> None:
+        fixture_path = Path(__file__).parent / "fixtures" / "phase13_metadata_eval.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        documents = [FetchedDocument.from_dict(item) for item in fixture["documents"]]
+
+        claims = extract_claims(documents, max_claims_per_document=4)
+        conflicts = detect_claim_conflicts(claims)
+
+        current_claim = claims[0]
+        expected = fixture["expected"]
+        self.assertEqual(current_claim.source_dates, expected["source_dates"])
+        for constraint in expected["version_constraints"]:
+            self.assertTrue(any(constraint in claim.version_constraints for claim in claims))
+        self.assertTrue(conflicts)
+        self.assertIn(expected["conflict_reason_contains"], conflicts[0].reason)
     def test_extract_claims_skips_failed_or_empty_documents(self) -> None:
         failed = FetchedDocument(
             url="https://example.com/error",

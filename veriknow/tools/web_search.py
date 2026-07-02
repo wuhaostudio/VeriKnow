@@ -5,7 +5,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import quote_plus
 
@@ -20,6 +20,7 @@ class SearchResult:
     source_type: str = "unknown"
     published_at: str | None = None
     updated_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 class SearchProviderError(Exception):
@@ -186,11 +187,26 @@ def _brave_results(payload: dict[str, Any]) -> list[SearchResult]:
                 snippet=str(item.get("description") or ""),
                 source_type=_source_type_for_url(url),
                 published_at=_optional_string(item.get("age")),
+                raw=_compact_raw_result(item),
             )
         )
     return results
 
 
+def _compact_raw_result(item: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        "title",
+        "url",
+        "description",
+        "age",
+        "profile",
+        "language",
+        "family_friendly",
+        "page_age",
+        "page_fetched",
+        "thumbnail",
+    }
+    return {key: value for key, value in item.items() if key in allowed_keys}
 def _source_type_for_url(url: str) -> str:
     lowered = url.lower()
     if "github.com" in lowered:

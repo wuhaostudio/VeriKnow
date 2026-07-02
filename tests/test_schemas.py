@@ -1,6 +1,6 @@
 import unittest
 
-from veriknow.schemas import EvidenceClaim, EvidenceItem, FetchedDocument, PublicationJob, RunRecord, TaskSpec, VerificationResult
+from veriknow.schemas import EvidenceClaim, EvidenceItem, FetchedDocument, KnowledgeMergeProposal, PublicationJob, RunRecord, TaskSpec, VerificationResult
 
 
 class SchemaTests(unittest.TestCase):
@@ -24,6 +24,26 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             EvidenceItem(title="", url="https://example.com")
 
+
+    def test_knowledge_merge_proposal_round_trip(self) -> None:
+        proposal = KnowledgeMergeProposal(
+            run_id="run-test",
+            operation="update",
+            target_path="data/knowledge/general/example.md",
+            target_title="Example",
+            rationale="Update existing knowledge document.",
+            evidence_urls=["https://example.com/docs"],
+            conflicts=["Older source is deprecated."],
+            diff="--- old\n+++ new\n",
+            risk_level="high",
+        )
+
+        loaded = KnowledgeMergeProposal.from_dict(proposal.to_dict())
+
+        self.assertEqual(loaded.operation, "update")
+        self.assertEqual(loaded.evidence_urls, ["https://example.com/docs"])
+        self.assertEqual(loaded.conflicts, ["Older source is deprecated."])
+        self.assertEqual(loaded.risk_level, "high")
     def test_publication_job_round_trip(self) -> None:
         job = PublicationJob(
             document_path="data/knowledge/general/example.md",

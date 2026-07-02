@@ -1,0 +1,38 @@
+{
+  "documents": [
+    {
+      "url": "https://docs.example.com/current",
+      "title": "Current Example API Docs",
+      "text": "Published: 2026-01-10. Last updated: 2026-06-26. Version 2.0 supports tool calling. Python >=3.11 is required for the SDK.",
+      "fetched_at": "2026-06-26T00:00:00+00:00",
+      "status_code": 200,
+      "content_hash": "fixture-current",
+      "metadata": {
+        "source_type": "official_doc",
+        "published_at": "2026-01-10",
+        "confidence": "high"
+      }
+    },
+    {
+      "url": "https://docs.example.com/old",
+      "title": "Old Example API Docs",
+      "text": "Published: 2025-01-01. Version 2.0 tool calling is deprecated for the Example API.",
+      "fetched_at": "2026-06-26T00:00:00+00:00",
+      "status_code": 200,
+      "content_hash": "fixture-old",
+      "metadata": {
+        "source_type": "official_doc",
+        "published_at": "2025-01-01",
+        "confidence": "high"
+      }
+    }
+  ],
+  "expected": {
+    "source_dates": {
+      "published_at": "2026-01-10",
+      "updated_at": "2026-06-26"
+    },
+    "version_constraints": ["Version 2.0", "Python >=3.11"],
+    "conflict_reason_contains": "opposing availability or support claims"
+  }
+}

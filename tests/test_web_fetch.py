@@ -96,6 +96,39 @@ class WebFetchTests(unittest.TestCase):
             self.assertTrue(raw_path.exists())
             self.assertEqual(raw_path.parent, raw_dir)
             self.assertIn("Raw page.", raw_path.read_text(encoding="utf-8"))
+
+    def test_fetch_documents_propagates_evidence_metadata(self) -> None:
+        from veriknow.schemas import EvidenceItem, FetchedDocument
+        from veriknow.tools.web_fetch import fetch_documents
+
+        class FakeFetcher:
+            def fetch(self, url: str, *, title: str = "") -> FetchedDocument:
+                return FetchedDocument(
+                    url=url,
+                    title=title,
+                    text="Fetched text.",
+                    fetched_at="2026-06-26T00:00:00+00:00",
+                    status_code=200,
+                    content_hash="hash-1",
+                )
+
+        item = EvidenceItem(
+            title="Official docs",
+            url="https://docs.example.com/guide",
+            source_type="official_doc",
+            snippet="Snippet text.",
+            published_at="2026-01-01",
+            updated_at="2026-06-26",
+            confidence="high",
+        )
+
+        document = fetch_documents([item], fetcher=FakeFetcher())[0]
+
+        self.assertEqual(document.metadata["source_type"], "official_doc")
+        self.assertEqual(document.metadata["source_snippet"], "Snippet text.")
+        self.assertEqual(document.metadata["published_at"], "2026-01-01")
+        self.assertEqual(document.metadata["updated_at"], "2026-06-26")
+        self.assertEqual(document.metadata["confidence"], "high")
     def test_fetcher_records_unsupported_urls(self) -> None:
         document = WebPageFetcher().fetch("file:///tmp/example.html", title="Local")
 

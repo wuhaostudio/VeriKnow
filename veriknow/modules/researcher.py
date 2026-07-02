@@ -24,10 +24,12 @@ SUPPORTED_RESEARCH_STRATEGIES = {"deterministic", "ai"}
 class Researcher:
     def __init__(self, provider: WebSearchProvider | None = None):
         self.provider = provider or StaticSeedSearchProvider()
+        self.last_raw_search_payloads: list[dict[str, Any]] = []
 
     def research(self, task: TaskSpec, *, run_id: str, limit: int = 5) -> EvidenceBundle:
         query = self._query_for(task)
         results = self.provider.search(query, limit=limit)
+        self.last_raw_search_payloads = [result.raw for result in results if result.raw]
         items = [self._result_to_item(result) for result in results]
         ranked_items = rank_evidence_items(items)
         return EvidenceBundle(

@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from veriknow.modules.knowledge import KnowledgeDocument, MarkdownKnowledgeIndex
-from veriknow.schemas import KnowledgePatch, RunRecord
+from veriknow.schemas import KnowledgeMergeProposal, KnowledgePatch, RunRecord
 
 
 class KnowledgeCurator:
@@ -95,10 +95,41 @@ class KnowledgeCurator:
             approved=False,
         )
 
+    def create_merge_proposal(
+        self,
+        record: RunRecord,
+        patch: KnowledgePatch,
+        report_path: Path,
+    ) -> KnowledgeMergeProposal:
+        if not report_path.exists():
+            raise FileNotFoundError(f"report not found: {report_path}")
+
+        target_path = Path(patch.target_path)
+        report_content = report_path.read_text(encoding="utf-8")
+        target_exists = target_path.exists()
+        operation = "update" if target_exists else "create"
+        target_title = _title_from_content(report_content, target_path)
+        evidence_urls = _extract_urls(report_content)
+        conflicts = _extract_conflict_lines(report_content)
+        risk_level = _risk_level_for(operation, conflicts)
+        rationale = _proposal_rationale(operation, target_title, evidence_urls, conflicts)
+        return KnowledgeMergeProposal(
+            run_id=record.run_id,
+            operation=operation,
+            target_path=str(target_path),
+            target_title=target_title,
+            rationale=rationale,
+            evidence_urls=evidence_urls,
+            conflicts=conflicts,
+            diff=patch.diff,
+            risk_level=risk_level,
+        )
+
     def write_patch_files(
         self,
         patch: KnowledgePatch,
         run_dir: Path,
+        proposal: KnowledgeMergeProposal | None = None,
     ) -> tuple[Path, Path]:
         diff_path = run_dir / "patch.diff"
         patch_path = run_dir / "knowledge_patch.json"
@@ -107,6 +138,12 @@ class KnowledgeCurator:
             json.dumps(patch.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        if proposal is not None:
+            proposal_path = run_dir / "knowledge_merge_proposal.json"
+            proposal_path.write_text(
+                json.dumps(proposal.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         return diff_path, patch_path
 
     def apply_patch(
@@ -171,3 +208,53 @@ def _unified_diff(original: str, updated: str, *, fromfile: str, tofile: str) ->
         lineterm="",
     )
     return "\n".join(lines) + "\n"
+
+
+def load_knowledge_merge_proposal(path: Path) -> KnowledgeMergeProposal:
+    if not path.exists():
+        raise FileNotFoundError(f"knowledge merge proposal not found: {path}")
+    return KnowledgeMergeProposal.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _title_from_content(content: str, fallback_path: Path) -> str:
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return fallback_path.stem.replace("-", " ").replace("_", " ").strip()
+
+
+def _extract_urls(content: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"https?://[^\s)\]>\"']+", content):
+        url = match.group(0).rstrip(".,;")
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def _extract_conflict_lines(content: str) -> list[str]:
+    conflicts: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip(" -\t")
+        lowered = stripped.lower()
+        if stripped and any(term in lowered for term in ["conflict", "contradict", "outdated", "deprecated"]):
+            conflicts.append(stripped[:240])
+    return conflicts[:20]
+
+
+def _risk_level_for(operation: str, conflicts: list[str]) -> str:
+    if conflicts:
+        return "high"
+    if operation == "update":
+        return "medium"
+    return "low"
+
+
+def _proposal_rationale(operation: str, title: str, evidence_urls: list[str], conflicts: list[str]) -> str:
+    action = "Update existing" if operation == "update" else "Create new"
+    support = f"{len(evidence_urls)} evidence URL(s)" if evidence_urls else "no explicit evidence URLs"
+    conflict_note = f" and {len(conflicts)} conflict marker(s)" if conflicts else ""
+    return f"{action} knowledge document for {title} using {support}{conflict_note}."

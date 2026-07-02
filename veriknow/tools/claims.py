@@ -28,6 +28,14 @@ DATE_OR_VERSION_PATTERN = re.compile(
 )
 SENTENCE_PATTERN = re.compile(r"(?<=[.!?。！？])\s+")
 TOKEN_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
+DATE_LABEL_PATTERN = re.compile(
+    r"\b(?:published|updated|released|last updated|modified)\s*(?:on|at|:)?\s*(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b",
+    re.IGNORECASE,
+)
+VERSION_CONSTRAINT_PATTERN = re.compile(
+    r"\b(?:version|v|python|node|api|sdk)\s*(?:>=|<=|>|<|=|is|:)?\s*v?\d+(?:\.\d+){0,2}\b",
+    re.IGNORECASE,
+)
 
 NEGATIVE_TERMS = {"deprecated", "removed", "unsupported", "legacy", "obsolete"}
 POSITIVE_TERMS = {"available", "recommended", "stable", "supports", "supported"}
@@ -142,6 +150,9 @@ class AIClaimExtractor:
                     "status_code": document.status_code,
                     "error_code": document.error_code,
                     "message": document.message,
+                    "metadata": document.metadata,
+                    "source_dates": _source_dates_for_document(document),
+                    "version_constraints": _version_constraints_for_text(document.text),
                 }
                 for document in documents
                 if not document.error_code and document.text.strip()
@@ -182,6 +193,8 @@ class AIClaimExtractor:
                     updated_at=_optional_string(raw_claim.get("updated_at")),
                     confidence=str(raw_claim.get("confidence") or "medium"),
                     freshness=str(raw_claim.get("freshness") or _freshness_for_text(text)),
+                    source_dates=_string_dict(raw_claim.get("source_dates")) or _source_dates_for_document(document),
+                    version_constraints=_string_list(raw_claim.get("version_constraints")) or _version_constraints_for_text(text),
                     caveats=_string_list(raw_claim.get("caveats")),
                     conflicts=_string_list(raw_claim.get("conflicts")),
                 )
@@ -246,7 +259,9 @@ def _candidate_sentences(document: FetchedDocument, *, limit: int) -> list[str]:
 
 
 def _claim_from_sentence(document: FetchedDocument, sentence: str) -> EvidenceClaim:
-    freshness = "dated" if DATE_OR_VERSION_PATTERN.search(sentence) else "unknown"
+    source_dates = _source_dates_for_document(document)
+    version_constraints = _version_constraints_for_text(sentence)
+    freshness = "dated" if source_dates or version_constraints or DATE_OR_VERSION_PATTERN.search(sentence) else "unknown"
     caveats = []
     lowered = sentence.lower()
     if "deprecated" in lowered:
@@ -259,9 +274,13 @@ def _claim_from_sentence(document: FetchedDocument, sentence: str) -> EvidenceCl
         source_url=document.url,
         source_title=document.title,
         quote=sentence[:500],
-        source_type="fetched_document",
-        confidence="medium",
+        source_type=str(document.metadata.get("source_type") or "fetched_document"),
+        published_at=source_dates.get("published_at"),
+        updated_at=source_dates.get("updated_at"),
+        confidence=str(document.metadata.get("confidence") or "medium"),
         freshness=freshness,
+        source_dates=source_dates,
+        version_constraints=version_constraints,
         caveats=caveats,
     )
 
@@ -346,6 +365,34 @@ def _string_list(value: Any) -> list[str]:
         return []
     return [str(item).strip() for item in value if str(item).strip()]
 
+def _string_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item).strip() for key, item in value.items() if str(item).strip()}
 
+
+def _source_dates_for_document(document: FetchedDocument) -> dict[str, str]:
+    dates: dict[str, str] = {}
+    for key in ("published_at", "updated_at"):
+        value = _optional_string(document.metadata.get(key))
+        if value:
+            dates[key] = value
+    for match in DATE_LABEL_PATTERN.finditer(document.text[:4000]):
+        label = match.group(0).lower()
+        key = "updated_at" if "updated" in label or "modified" in label else "published_at"
+        dates.setdefault(key, match.group(1))
+    return dates
+
+
+def _version_constraints_for_text(text: str) -> list[str]:
+    seen: set[str] = set()
+    constraints: list[str] = []
+    for match in VERSION_CONSTRAINT_PATTERN.finditer(text):
+        value = re.sub(r"\s+", " ", match.group(0)).strip()
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            constraints.append(value)
+    return constraints[:8]
 def _freshness_for_text(text: str) -> str:
     return "dated" if DATE_OR_VERSION_PATTERN.search(text) else "unknown"
