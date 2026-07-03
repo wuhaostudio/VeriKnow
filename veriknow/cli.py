@@ -9,7 +9,8 @@ from veriknow.config import create_default_config, ensure_data_dirs, load_config
 from veriknow.llm import create_llm_client
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.adaptive_profile import AdaptiveProfile
-from veriknow.modules.curator import KnowledgeCurator, load_knowledge_patch
+from veriknow.modules.curator import AIKnowledgeCurator, KnowledgeCurator, SUPPORTED_CURATION_STRATEGIES, load_knowledge_patch
+from veriknow.modules.inspector import inspect_run
 from veriknow.modules.knowledge import MarkdownKnowledgeIndex, title_from_markdown
 from veriknow.modules.normalizer import AIRequirementNormalizer, RequirementNormalizer, SUPPORTED_NORMALIZER_STRATEGIES
 from veriknow.modules.planner import AIVerificationPlanner, SUPPORTED_PLANNING_STRATEGIES, VerificationPlanner, render_verification_checklist
@@ -109,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     llm_check_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     llm_check_parser.set_defaults(handler=handle_llm_check)
 
+    inspect_parser = subparsers.add_parser("inspect", help="Review a run and its artifacts.")
+    inspect_parser.add_argument("run_id")
+    inspect_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    inspect_parser.set_defaults(handler=handle_inspect)
+
     memory_parser = subparsers.add_parser("memory", help="Inspect local memory records.")
     memory_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command")
@@ -144,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     curate_parser = subparsers.add_parser("curate", help="Generate a knowledge update patch for a run.")
     curate_parser.add_argument("run_id")
+    curate_parser.add_argument(
+        "--strategy",
+        choices=sorted(SUPPORTED_CURATION_STRATEGIES),
+        default="deterministic",
+        help="Knowledge curation strategy.",
+    )
     curate_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     curate_parser.set_defaults(handler=handle_curate)
 
@@ -416,6 +428,15 @@ def handle_llm_check(args: argparse.Namespace) -> None:
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
 
 
+def handle_inspect(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    store = MemoryStore(config)
+    record = store.get_run(args.run_id)
+    if record is None:
+        raise KeyError(f"run not found: {args.run_id}")
+    print(json.dumps(inspect_run(record, store.run_dir(record.run_id)), ensure_ascii=False, indent=2))
+
+
 def handle_memory_runs(args: argparse.Namespace) -> None:
     store = MemoryStore(load_config(args.config))
     runs = store.list_runs(limit=args.limit)
@@ -504,18 +525,39 @@ def handle_curate(args: argparse.Namespace) -> None:
     )
     curator = KnowledgeCurator()
     patch = curator.create_patch(record, report_path, config.knowledge_dir)
-    proposal = curator.create_merge_proposal(record, patch, report_path)
-    diff_path, patch_path = curator.write_patch_files(patch, store.run_dir(record.run_id), proposal=proposal)
-    proposal_path = store.run_dir(record.run_id) / "knowledge_merge_proposal.json"
+    curation_artifact = None
+    if args.strategy == "ai":
+        related_documents = curator.find_related(
+            record,
+            report_path.read_text(encoding="utf-8"),
+            config.knowledge_dir,
+        )
+        result = AIKnowledgeCurator(create_llm_client(config), base=curator).create_merge_proposal(
+            record,
+            patch,
+            report_path,
+            related_documents=related_documents,
+        )
+        proposal = result.proposal
+        curation_artifact = result.artifact
+    else:
+        proposal = curator.create_merge_proposal(record, patch, report_path)
+    run_dir = store.run_dir(record.run_id)
+    diff_path, patch_path = curator.write_patch_files(patch, run_dir, proposal=proposal)
+    proposal_path = run_dir / "knowledge_merge_proposal.json"
+    artifacts = {
+        "related_knowledge": str(related_path),
+        "patch_diff": str(diff_path),
+        "knowledge_patch": str(patch_path),
+        "knowledge_merge_proposal": str(proposal_path),
+    }
+    if curation_artifact is not None:
+        artifact_path = _write_llm_artifact(run_dir, "curator", curation_artifact.to_dict())
+        artifacts["llm_curator"] = str(artifact_path)
     store.update_run(
         record.run_id,
         status="curated",
-        artifacts={
-            "related_knowledge": str(related_path),
-            "patch_diff": str(diff_path),
-            "knowledge_patch": str(patch_path),
-            "knowledge_merge_proposal": str(proposal_path),
-        },
+        artifacts=artifacts,
     )
     print(json.dumps(patch.to_dict(), ensure_ascii=False, indent=2))
 

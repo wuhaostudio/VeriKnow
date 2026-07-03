@@ -418,6 +418,51 @@ class CliTests(unittest.TestCase):
             self.assertEqual(output[0]["title"], "LangChain Supervisor")
             self.assertIn("Multi-agent", output[0]["snippet"])
 
+    def test_inspect_command_summarizes_artifacts_with_redaction(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            data_dir = tmp_path / "data"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {data_dir}",
+                        f"database_path: {data_dir / 'memory.sqlite'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            run_stdout = StringIO()
+            with redirect_stdout(run_stdout):
+                main(["run", "Research inspect", "--dry-run", "--config", str(config_path)])
+            run_id = json.loads(run_stdout.getvalue())["run_id"]
+            secret_artifact = data_dir / "runs" / run_id / "secret.json"
+            secret_artifact.write_text(
+                json.dumps({"token": "secret-token", "message": "Authorization: Bearer abc123"}),
+                encoding="utf-8",
+            )
+
+            from veriknow.config import load_config
+            from veriknow.memory.store import MemoryStore
+
+            store = MemoryStore(load_config(config_path))
+            store.update_run(run_id, artifacts={"secret": str(secret_artifact)})
+
+            inspect_stdout = StringIO()
+            with redirect_stdout(inspect_stdout):
+                main(["inspect", run_id, "--config", str(config_path)])
+
+            output_text = inspect_stdout.getvalue()
+            output = json.loads(output_text)
+            self.assertEqual(output["run"]["run_id"], run_id)
+            self.assertEqual(output["artifact_count"], 2)
+            self.assertIn("secret.json", output_text)
+            self.assertNotIn("secret-token", output_text)
+            self.assertNotIn("abc123", output_text)
+            self.assertIn("[REDACTED]", output_text)
+
     def test_publish_command_records_feishu_stub_job(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -807,3 +852,51 @@ class CliTests(unittest.TestCase):
             self.assertEqual(patch["target_path"], str(knowledge_path))
             self.assertFalse(patch["approved"])
             self.assertEqual(knowledge_path.read_text(encoding="utf-8"), original)
+
+    def test_curate_command_ai_strategy_writes_artifact_on_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            data_dir = tmp_path / "data"
+            knowledge_path = data_dir / "knowledge" / "agents" / "langchain-supervisor.md"
+            knowledge_path.parent.mkdir(parents=True)
+            knowledge_path.write_text("# LangChain Supervisor\n\nOld workflow.\n", encoding="utf-8")
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {data_dir}",
+                        f"database_path: {data_dir / 'memory.sqlite'}",
+                        "model_provider: stub",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            run_stdout = StringIO()
+            with redirect_stdout(run_stdout):
+                main(["run", "Research LangChain Supervisor", "--dry-run", "--config", str(config_path)])
+            run_id = json.loads(run_stdout.getvalue())["run_id"]
+
+            with redirect_stdout(StringIO()):
+                main(["write", run_id, "--config", str(config_path)])
+
+            curate_stdout = StringIO()
+            with redirect_stdout(curate_stdout):
+                main(["curate", run_id, "--strategy", "ai", "--config", str(config_path)])
+
+            patch = json.loads(curate_stdout.getvalue())
+            run_dir = data_dir / "runs" / run_id
+            artifact_path = run_dir / "llm" / "curator.json"
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            proposal = json.loads((run_dir / "knowledge_merge_proposal.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(patch["target_path"], str(knowledge_path))
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact["strategy"], "ai")
+            self.assertEqual(artifact["provider"], "stub")
+            self.assertEqual(artifact["status"], "fallback")
+            self.assertTrue(artifact["fallback_used"])
+            self.assertEqual(proposal["target_path"], str(knowledge_path))
+            self.assertEqual(knowledge_path.read_text(encoding="utf-8"), "# LangChain Supervisor\n\nOld workflow.\n")
+

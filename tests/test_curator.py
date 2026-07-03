@@ -107,3 +107,55 @@ class CuratorTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 KnowledgeCurator().apply_patch(patch, report_path, tmp_path / "knowledge")
+
+    def test_ai_curator_accepts_valid_merge_proposal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from veriknow.modules.curator import AIKnowledgeCurator
+
+        class FakeLLM:
+            provider = "fake"
+            model = "fake-model"
+
+            def generate_json(self, prompt, *, context=None):
+                seed = context["seed_proposal"]
+                return {
+                    "operation": "replace_section",
+                    "target_path": seed["target_path"],
+                    "target_title": seed["target_title"],
+                    "rationale": "Replace the outdated workflow section using cited evidence.",
+                    "evidence_urls": ["https://example.com/docs"],
+                    "conflicts": ["Older workflow is deprecated."],
+                    "diff": seed["diff"],
+                    "risk_level": "high",
+                }
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            knowledge_dir = tmp_path / "knowledge"
+            existing_path = knowledge_dir / "general" / "example.md"
+            existing_path.parent.mkdir(parents=True)
+            existing_path.write_text("# Example\n\nOld workflow.\n", encoding="utf-8")
+            report_path = tmp_path / "run" / "report.md"
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text("# Example\n\nUpdated workflow from https://example.com/docs.\n", encoding="utf-8")
+            record = RunRecord(
+                run_id="run-test",
+                raw_request="Research example",
+                task=TaskSpec(
+                    raw_request="Research example",
+                    objective="Research",
+                    target="Example",
+                ),
+            )
+
+            curator = KnowledgeCurator()
+            patch = curator.create_patch(record, report_path, knowledge_dir)
+            result = AIKnowledgeCurator(FakeLLM(), base=curator).create_merge_proposal(record, patch, report_path)
+
+            self.assertEqual(result.proposal.operation, "replace_section")
+            self.assertEqual(result.proposal.evidence_urls, ["https://example.com/docs"])
+            self.assertEqual(result.proposal.diff, patch.diff)
+            self.assertIsNotNone(result.artifact)
+            self.assertEqual(result.artifact.status, "completed")
+
