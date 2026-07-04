@@ -20,6 +20,7 @@ from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESE
 from veriknow.modules.verifier import Verifier
 from veriknow.schemas import EvidenceBundle, EvidenceClaim, VerificationPlan
 from veriknow.tools.claims import AIClaimExtractor, detect_claim_conflicts, extract_claims
+from veriknow.tools.computer_runtime import create_computer_runtime
 from veriknow.tools.computer_use import ComputerUseSafetyConfig, ComputerUseVerifier
 from veriknow.tools.web_fetch import fetch_documents
 from veriknow.tools.markdown import write_report
@@ -100,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["browser", "computer-use"],
         default="browser",
         help="Verification execution mode.",
+    )
+    verify_parser.add_argument(
+        "--computer-use-runtime",
+        help="Computer-use runtime override, such as trace-only or playwright.",
     )
     verify_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     verify_parser.set_defaults(handler=handle_verify)
@@ -208,6 +213,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute steps marked as requiring approval.",
     )
     reverify_parser.add_argument("--limit", type=int, default=5, help="Maximum number of sources to keep.")
+    reverify_parser.add_argument(
+        "--computer-use-runtime",
+        help="Computer-use runtime override, such as trace-only or playwright.",
+    )
     reverify_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     reverify_parser.set_defaults(handler=handle_reverify)
 
@@ -410,11 +419,7 @@ def handle_verify(args: argparse.Namespace) -> None:
     if plan is None:
         raise ValueError("verification_plan artifact is required; run `veriknow plan <run_id>` first")
 
-    safety = ComputerUseSafetyConfig(
-        allowed_domains=config.computer_use_domain_allowlist,
-        approval_keywords=config.computer_use_approval_keywords,
-    )
-    run = Verifier(computer_use=ComputerUseVerifier(safety)).verify(
+    run = Verifier(computer_use=_computer_use_verifier(config, args.computer_use_runtime)).verify(
         plan,
         run_dir=store.run_dir(record.run_id),
         include_approval_required=args.include_approval_required,
@@ -717,11 +722,7 @@ def handle_reverify(args: argparse.Namespace) -> None:
     if record is None:
         raise KeyError(f"run not found: {run_id}")
 
-    safety = ComputerUseSafetyConfig(
-        allowed_domains=config.computer_use_domain_allowlist,
-        approval_keywords=config.computer_use_approval_keywords,
-    )
-    verification = Verifier(computer_use=ComputerUseVerifier(safety)).verify(
+    verification = Verifier(computer_use=_computer_use_verifier(config, args.computer_use_runtime)).verify(
         plan,
         run_dir=run_dir,
         include_approval_required=args.include_approval_required,
@@ -768,6 +769,21 @@ def handle_reverify(args: argparse.Namespace) -> None:
     )
     print(json.dumps(record.to_dict(), ensure_ascii=False, indent=2))
 
+
+
+
+def _computer_use_verifier(config, runtime_override: str | None = None) -> ComputerUseVerifier:
+    safety = ComputerUseSafetyConfig(
+        allowed_domains=config.computer_use_domain_allowlist,
+        approval_keywords=config.computer_use_approval_keywords,
+        max_steps=config.computer_use_max_steps,
+        max_seconds=config.computer_use_max_seconds,
+        read_only=config.computer_use_read_only,
+        store_screenshots=config.computer_use_store_screenshots,
+        require_approval_for_forms=config.computer_use_require_approval_for_forms,
+    )
+    runtime = create_computer_runtime(runtime_override or config.computer_use_runtime)
+    return ComputerUseVerifier(safety, runtime)
 
 def _write_llm_artifact(run_dir: Path, name: str, payload: dict) -> Path:
     llm_dir = run_dir / "llm"

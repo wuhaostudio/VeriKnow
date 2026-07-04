@@ -23,6 +23,12 @@ class ConfigTests(unittest.TestCase):
                         "feishu_title_strategy: front_matter",
                         "computer_use_domain_allowlist: example.com, docs.example.com",
                         "computer_use_approval_keywords: login,payment,delete",
+                        "computer_use_runtime: playwright",
+                        "computer_use_max_steps: 6",
+                        "computer_use_max_seconds: 90",
+                        "computer_use_read_only: true",
+                        "computer_use_store_screenshots: false",
+                        "computer_use_require_approval_for_forms: false",
                         "default_reverify_interval_days: 14",
                         "model_provider: stub",
                         "model_name: glm-test",
@@ -58,6 +64,12 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.feishu_title_strategy, "front_matter")
             self.assertEqual(config.computer_use_domain_allowlist, ("example.com", "docs.example.com"))
             self.assertEqual(config.computer_use_approval_keywords, ("login", "payment", "delete"))
+            self.assertEqual(config.computer_use_runtime, "playwright")
+            self.assertEqual(config.computer_use_max_steps, 6)
+            self.assertEqual(config.computer_use_max_seconds, 90)
+            self.assertTrue(config.computer_use_read_only)
+            self.assertFalse(config.computer_use_store_screenshots)
+            self.assertFalse(config.computer_use_require_approval_for_forms)
             self.assertEqual(config.default_reverify_interval_days, 14)
             self.assertEqual(config.model_provider, "stub")
             self.assertEqual(config.model_name, "glm-test")

@@ -21,6 +21,12 @@ DEFAULT_CONFIG = {
         "login,sign in,password,billing,payment,purchase,delete,destructive,"
         "account change,account settings"
     ),
+    "computer_use_runtime": "trace-only",
+    "computer_use_max_steps": 12,
+    "computer_use_max_seconds": 180,
+    "computer_use_read_only": True,
+    "computer_use_store_screenshots": True,
+    "computer_use_require_approval_for_forms": True,
     "default_reverify_interval_days": 30,
     "model_provider": "zhipu",
     "model_name": "glm-5.2",
@@ -52,6 +58,12 @@ class Config:
     feishu_title_strategy: str = "filename"
     computer_use_domain_allowlist: tuple[str, ...] = ()
     computer_use_approval_keywords: tuple[str, ...] = ()
+    computer_use_runtime: str = "trace-only"
+    computer_use_max_steps: int = 12
+    computer_use_max_seconds: int = 180
+    computer_use_read_only: bool = True
+    computer_use_store_screenshots: bool = True
+    computer_use_require_approval_for_forms: bool = True
     default_reverify_interval_days: int = 30
     model_provider: str = "zhipu"
     model_name: str = "glm-5.2"
@@ -123,6 +135,25 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             values.get(
                 "computer_use_approval_keywords",
                 DEFAULT_CONFIG["computer_use_approval_keywords"],
+            )
+        ),
+        computer_use_runtime=str(values.get("computer_use_runtime", DEFAULT_CONFIG["computer_use_runtime"])),
+        computer_use_max_steps=int(
+            values.get("computer_use_max_steps", DEFAULT_CONFIG["computer_use_max_steps"])
+        ),
+        computer_use_max_seconds=int(
+            values.get("computer_use_max_seconds", DEFAULT_CONFIG["computer_use_max_seconds"])
+        ),
+        computer_use_read_only=_parse_bool(
+            values.get("computer_use_read_only", DEFAULT_CONFIG["computer_use_read_only"])
+        ),
+        computer_use_store_screenshots=_parse_bool(
+            values.get("computer_use_store_screenshots", DEFAULT_CONFIG["computer_use_store_screenshots"])
+        ),
+        computer_use_require_approval_for_forms=_parse_bool(
+            values.get(
+                "computer_use_require_approval_for_forms",
+                DEFAULT_CONFIG["computer_use_require_approval_for_forms"],
             )
         ),
         default_reverify_interval_days=int(

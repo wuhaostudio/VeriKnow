@@ -4,6 +4,7 @@ import unittest
 from veriknow.modules.verifier import Verifier
 from veriknow.schemas import VerificationPlan, VerificationStep
 from veriknow.tools.browser import BrowserObservation
+from veriknow.tools.computer_runtime import RuntimeObservation
 from veriknow.tools.computer_use import ComputerUseSafetyConfig, ComputerUseVerifier
 
 
@@ -27,6 +28,28 @@ class FakeBrowser:
             log_path=str(log_path),
         )
 
+
+class FakeComputerRuntime:
+    name = "fake-runtime"
+
+    def inspect_url(
+        self,
+        url: str,
+        *,
+        expected_result: str,
+        screenshot_path: Path,
+        log_path: Path,
+    ) -> RuntimeObservation:
+        screenshot_path.write_bytes(b"fake computer screenshot")
+        return RuntimeObservation(
+            status="passed",
+            final_url=url,
+            title="Fake Docs",
+            http_status="200",
+            screenshot_path=str(screenshot_path),
+            log_path=str(log_path),
+            observations=[f"expected={expected_result}"],
+        )
 
 class VerifierTests(unittest.TestCase):
     def test_verifier_executes_browser_steps_and_writes_artifacts(self) -> None:
@@ -139,3 +162,35 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(run.status, "blocked")
             self.assertEqual(run.results[0].status, "blocked")
             self.assertIn("allowlist", run.results[0].actual_result)
+
+    def test_verifier_uses_configured_computer_runtime(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            plan = VerificationPlan(
+                task_id="run-test",
+                steps=[
+                    VerificationStep(
+                        description="Open documentation in runtime browser",
+                        expected_result="URL: https://example.com/docs",
+                        method="computer-use",
+                        screenshot_required=True,
+                    )
+                ],
+            )
+            computer_use = ComputerUseVerifier(
+                ComputerUseSafetyConfig(allowed_domains=("example.com",)),
+                FakeComputerRuntime(),
+            )
+
+            run = Verifier(FakeBrowser(), computer_use).verify(
+                plan,
+                run_dir=run_dir,
+                mode="computer-use",
+            )
+
+            self.assertEqual(run.status, "completed")
+            self.assertEqual(run.results[0].status, "passed")
+            self.assertIn("runtime=fake-runtime", run.results[0].observations)
+            self.assertIn("Fake Docs", run.results[0].actual_result)
