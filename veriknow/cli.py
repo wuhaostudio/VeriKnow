@@ -10,6 +10,7 @@ from veriknow.llm import create_llm_client
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.adaptive_profile import AdaptiveProfile
 from veriknow.modules.curator import AIKnowledgeCurator, KnowledgeCurator, SUPPORTED_CURATION_STRATEGIES, load_knowledge_patch
+from veriknow.modules.evaluation import evaluate_path
 from veriknow.modules.inspector import inspect_run
 from veriknow.modules.knowledge import MarkdownKnowledgeIndex, title_from_markdown
 from veriknow.modules.normalizer import AIRequirementNormalizer, RequirementNormalizer, SUPPORTED_NORMALIZER_STRATEGIES
@@ -114,6 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("run_id")
     inspect_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     inspect_parser.set_defaults(handler=handle_inspect)
+    eval_parser = subparsers.add_parser("eval", help="Replay local evaluation fixtures or run artifacts.")
+    eval_parser.add_argument("path", help="Path to an evaluation fixture JSON file or run directory.")
+    eval_parser.set_defaults(handler=handle_eval)
 
     memory_parser = subparsers.add_parser("memory", help="Inspect local memory records.")
     memory_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
@@ -134,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     publications_parser.add_argument("--limit", type=int, default=20)
     publications_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     publications_parser.set_defaults(handler=handle_memory_publications)
+    mappings_parser = memory_subparsers.add_parser(
+        "publication-mappings",
+        help="List stable local document to publication target mappings.",
+    )
+    mappings_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    mappings_parser.set_defaults(handler=handle_memory_publication_mappings)
 
     pref_parser = subparsers.add_parser("preference", help="Append a task-relevant preference signal.")
     pref_parser.add_argument("key")
@@ -176,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser = subparsers.add_parser("publish", help="Publish an approved knowledge document.")
     publish_parser.add_argument("document_path")
     publish_parser.add_argument("--target", default="feishu", help="Publish target, such as feishu.")
+    publish_parser.add_argument("--update", action="store_true", help="Update or sync an existing published document when possible.")
     publish_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     publish_parser.set_defaults(handler=handle_publish)
 
@@ -436,6 +447,9 @@ def handle_inspect(args: argparse.Namespace) -> None:
         raise KeyError(f"run not found: {args.run_id}")
     print(json.dumps(inspect_run(record, store.run_dir(record.run_id)), ensure_ascii=False, indent=2))
 
+def handle_eval(args: argparse.Namespace) -> None:
+    print(json.dumps(evaluate_path(args.path), ensure_ascii=False, indent=2))
+
 
 def handle_memory_runs(args: argparse.Namespace) -> None:
     store = MemoryStore(load_config(args.config))
@@ -475,11 +489,32 @@ def handle_memory_publications(args: argparse.Namespace) -> None:
     for job in jobs:
         target_url = job.target_url or "-"
         error_code = job.error_code or "-"
+        document_id = job.target_document_id or "-"
+        remote_revision = job.remote_revision or "-"
+        content_hash = job.local_content_hash[:12] if job.local_content_hash else "-"
         print(
             f"{job.created_at}\t{job.target}\t{job.status}\t"
-            f"{job.document_path}\t{target_url}\t{error_code}"
+            f"{job.document_path}\t{target_url}\t{error_code}\t"
+            f"doc={document_id}\trev={remote_revision}\thash={content_hash}"
         )
 
+
+def handle_memory_publication_mappings(args: argparse.Namespace) -> None:
+    store = MemoryStore(load_config(args.config))
+    mappings = store.list_publication_mappings()
+    if not mappings:
+        print("No publication mappings found.")
+        return
+    for mapping in mappings:
+        target_url = mapping.target_url or "-"
+        document_id = mapping.target_document_id or "-"
+        remote_revision = mapping.remote_revision or "-"
+        content_hash = mapping.local_content_hash[:12] if mapping.local_content_hash else "-"
+        print(
+            f"{mapping.updated_at}\t{mapping.target}\t{mapping.status}\t"
+            f"{mapping.local_path}\t{target_url}\t"
+            f"doc={document_id}\trev={remote_revision}\thash={content_hash}"
+        )
 
 def handle_preference(args: argparse.Namespace) -> None:
     store = MemoryStore(load_config(args.config))
@@ -601,7 +636,15 @@ def handle_publish(args: argparse.Namespace) -> None:
     ensure_data_dirs(config)
     store = MemoryStore(config)
     approved = store.is_approved_knowledge_document(args.document_path)
-    job = publish_document(args.document_path, target=args.target, config=config, approved=approved)
+    last_publication = store.latest_successful_publication(args.document_path, args.target) if args.update else None
+    job = publish_document(
+        args.document_path,
+        target=args.target,
+        config=config,
+        approved=approved,
+        update=args.update,
+        last_publication=last_publication,
+    )
     store.append_publication_job(job)
     print(json.dumps(job.to_dict(), ensure_ascii=False, indent=2))
 

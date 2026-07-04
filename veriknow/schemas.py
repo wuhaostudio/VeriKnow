@@ -192,12 +192,33 @@ class PublicationJob(JsonModel):
     document_path: str
     target: str
     status: str = "pending"
+    local_path: str = ""
+    local_content_hash: str = ""
     target_document_id: str | None = None
     target_url: str | None = None
+    last_published_at: str | None = None
+    last_published_hash: str | None = None
+    remote_revision: str | None = None
     error_code: str | None = None
     message: str = ""
     created_at: str = field(default_factory=now_iso)
     completed_at: str | None = None
+
+
+@dataclass
+class PublicationMapping(JsonModel):
+    required_fields: ClassVar[tuple[str, ...]] = ("local_path", "target")
+
+    local_path: str
+    target: str
+    local_content_hash: str = ""
+    target_document_id: str | None = None
+    target_url: str | None = None
+    last_published_at: str | None = None
+    last_published_hash: str | None = None
+    remote_revision: str | None = None
+    status: str = "published"
+    updated_at: str = field(default_factory=now_iso)
 
 
 @dataclass

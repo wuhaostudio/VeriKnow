@@ -512,6 +512,74 @@ class CliTests(unittest.TestCase):
 
             self.assertIn(str(document_path), publications_stdout.getvalue())
             self.assertIn("missing_credentials", publications_stdout.getvalue())
+            self.assertIn("hash=", publications_stdout.getvalue())
+
+
+    def test_publish_update_skips_unchanged_document(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from veriknow.config import load_config
+        from veriknow.memory.store import MemoryStore
+        from veriknow.modules.publisher import content_hash_for
+        from veriknow.schemas import PublicationJob
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            data_dir = tmp_path / "data"
+            config_path = tmp_path / "config.yaml"
+            document_path = data_dir / "knowledge" / "general" / "example.md"
+            document_path.parent.mkdir(parents=True)
+            document_path.write_text("# Example\n", encoding="utf-8")
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {data_dir}",
+                        f"database_path: {data_dir / 'memory.sqlite'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            store = MemoryStore(config)
+            run = store.create_run("Research Example", task=__import__("veriknow.schemas", fromlist=["TaskSpec"]).TaskSpec(raw_request="Research Example", objective="Research", target="Example"))
+            store.complete_run(run.run_id, artifacts={"knowledge_document": str(document_path)})
+            store.append_publication_job(
+                PublicationJob(
+                    document_path=str(document_path.resolve()),
+                    target="feishu",
+                    status="published",
+                    local_path=str(document_path.resolve()),
+                    local_content_hash=content_hash_for(document_path),
+                    target_document_id="doc-123",
+                    target_url="https://example.feishu.cn/docx/doc-123",
+                    completed_at="2026-07-03T00:00:00+00:00",
+                )
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                main(["publish", str(document_path), "--target", "feishu", "--update", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["status"], "skipped")
+            self.assertEqual(output["target_document_id"], "doc-123")
+            self.assertEqual(output["last_published_hash"], output["local_content_hash"])
+            publications_stdout = StringIO()
+            with redirect_stdout(publications_stdout):
+                main(["memory", "publications", "--config", str(config_path)])
+
+            publications_output = publications_stdout.getvalue()
+            self.assertIn("doc=doc-123", publications_output)
+            self.assertIn("hash=", publications_output)
+
+            mappings_stdout = StringIO()
+            with redirect_stdout(mappings_stdout):
+                main(["memory", "publication-mappings", "--config", str(config_path)])
+
+            mappings_output = mappings_stdout.getvalue()
+            self.assertIn(str(document_path.resolve()), mappings_output)
+            self.assertIn("doc-123", mappings_output)
+            self.assertIn(content_hash_for(document_path)[:12], mappings_output)
 
     def test_publish_command_rejects_unapproved_knowledge_document(self) -> None:
         from tempfile import TemporaryDirectory

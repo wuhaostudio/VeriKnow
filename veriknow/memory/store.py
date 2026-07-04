@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 from veriknow.config import Config, ensure_data_dirs
-from veriknow.schemas import PublicationJob, RunRecord, TaskSpec, UserPreference, now_iso
+from veriknow.schemas import PublicationJob, PublicationMapping, RunRecord, TaskSpec, UserPreference, now_iso
 
 
 class MemoryStore:
@@ -57,6 +57,17 @@ class MemoryStore:
                     job_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     completed_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS publication_mappings (
+                    local_path TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    mapping_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (local_path, target)
                 )
                 """
             )
@@ -229,6 +240,18 @@ class MemoryStore:
                     job.completed_at,
                 ),
             )
+        if job.status == "published":
+            self.upsert_publication_mapping(PublicationMapping(
+                local_path=job.local_path or job.document_path,
+                target=job.target,
+                local_content_hash=job.local_content_hash,
+                target_document_id=job.target_document_id,
+                target_url=job.target_url,
+                last_published_at=job.completed_at,
+                last_published_hash=job.local_content_hash,
+                remote_revision=job.remote_revision,
+                status=job.status,
+            ))
         return job
 
     def list_publication_jobs(self, limit: int = 20) -> list[PublicationJob]:
@@ -243,6 +266,102 @@ class MemoryStore:
                 (limit,),
             ).fetchall()
         return [PublicationJob.from_dict(json.loads(row["job_json"])) for row in rows]
+
+    def upsert_publication_mapping(self, mapping: PublicationMapping) -> PublicationMapping:
+        local_path = str(Path(mapping.local_path).resolve())
+        mapping.local_path = local_path
+        mapping.updated_at = now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO publication_mappings (local_path, target, mapping_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(local_path, target) DO UPDATE SET
+                    mapping_json = excluded.mapping_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    mapping.local_path,
+                    mapping.target,
+                    json.dumps(mapping.to_dict(), ensure_ascii=False),
+                    mapping.updated_at,
+                ),
+            )
+        return mapping
+
+    def get_publication_mapping(
+        self,
+        document_path: str | Path,
+        target: str,
+    ) -> PublicationMapping | None:
+        local_path = str(Path(document_path).resolve())
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT mapping_json
+                FROM publication_mappings
+                WHERE local_path = ? AND target = ?
+                """,
+                (local_path, target),
+            ).fetchone()
+        if row is None:
+            return None
+        return PublicationMapping.from_dict(json.loads(row["mapping_json"]))
+
+    def list_publication_mappings(self) -> list[PublicationMapping]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT mapping_json
+                FROM publication_mappings
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return [PublicationMapping.from_dict(json.loads(row["mapping_json"])) for row in rows]
+
+    def latest_successful_publication(
+        self,
+        document_path: str | Path,
+        target: str,
+    ) -> PublicationJob | None:
+        mapping = self.get_publication_mapping(document_path, target)
+        if mapping is not None:
+            return PublicationJob(
+                document_path=mapping.local_path,
+                target=mapping.target,
+                status=mapping.status,
+                local_path=mapping.local_path,
+                local_content_hash=mapping.local_content_hash,
+                target_document_id=mapping.target_document_id,
+                target_url=mapping.target_url,
+                last_published_at=mapping.last_published_at,
+                last_published_hash=mapping.last_published_hash,
+                remote_revision=mapping.remote_revision,
+                completed_at=mapping.last_published_at,
+            )
+        candidate = str(Path(document_path).resolve())
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT job_json
+                FROM publication_jobs
+                WHERE target = ?
+                ORDER BY id DESC
+                """,
+                (target,),
+            ).fetchall()
+
+        for row in rows:
+            job = PublicationJob.from_dict(json.loads(row["job_json"]))
+            if job.status != "published":
+                continue
+            paths = {job.document_path}
+            if job.local_path:
+                paths.add(job.local_path)
+            for path_value in paths:
+                if str(Path(path_value).resolve()) == candidate:
+                    return job
+        return None
 
     def is_approved_knowledge_document(self, document_path: str | Path) -> bool:
         candidate = Path(document_path).resolve()

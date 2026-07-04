@@ -1,6 +1,6 @@
 import unittest
 
-from veriknow.schemas import EvidenceClaim, EvidenceItem, FetchedDocument, KnowledgeMergeProposal, PublicationJob, RunRecord, TaskSpec, VerificationResult
+from veriknow.schemas import EvidenceClaim, EvidenceItem, FetchedDocument, KnowledgeMergeProposal, PublicationJob, PublicationMapping, RunRecord, TaskSpec, VerificationResult
 
 
 class SchemaTests(unittest.TestCase):
@@ -49,8 +49,13 @@ class SchemaTests(unittest.TestCase):
             document_path="data/knowledge/general/example.md",
             target="feishu",
             status="blocked",
+            local_path="C:/project/VeriKnow/data/knowledge/general/example.md",
+            local_content_hash="hash-1",
             target_document_id="doc-1",
             target_url="https://example.feishu.cn/docx/doc-1",
+            last_published_at="2026-07-03T00:00:00+00:00",
+            last_published_hash="hash-0",
+            remote_revision="rev-1",
             error_code="missing_credentials",
             message="missing credentials",
         )
@@ -62,7 +67,29 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(loaded.status, "blocked")
         self.assertEqual(loaded.target_document_id, "doc-1")
         self.assertEqual(loaded.target_url, "https://example.feishu.cn/docx/doc-1")
+        self.assertEqual(loaded.local_content_hash, "hash-1")
+        self.assertEqual(loaded.last_published_hash, "hash-0")
+        self.assertEqual(loaded.remote_revision, "rev-1")
         self.assertEqual(loaded.error_code, "missing_credentials")
+
+
+    def test_publication_mapping_round_trip(self) -> None:
+        mapping = PublicationMapping(
+            local_path="data/knowledge/general/example.md",
+            target="feishu",
+            local_content_hash="hash-1",
+            target_document_id="doc-1",
+            target_url="https://example.feishu.cn/docx/doc-1",
+            last_published_hash="hash-1",
+            status="published",
+        )
+
+        loaded = PublicationMapping.from_dict(mapping.to_dict())
+
+        self.assertEqual(loaded.local_path, mapping.local_path)
+        self.assertEqual(loaded.target, "feishu")
+        self.assertEqual(loaded.target_document_id, "doc-1")
+        self.assertEqual(loaded.last_published_hash, "hash-1")
 
     def test_evidence_claim_round_trip(self) -> None:
         claim = EvidenceClaim(

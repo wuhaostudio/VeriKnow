@@ -5,7 +5,7 @@ from veriknow.config import Config
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.adaptive_profile import AdaptiveProfile
 from veriknow.modules.normalizer import RequirementNormalizer
-from veriknow.schemas import PublicationJob
+from veriknow.schemas import PublicationJob, PublicationMapping
 
 
 class MemoryTests(unittest.TestCase):
@@ -71,6 +71,116 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(jobs[0].document_path, job.document_path)
             self.assertEqual(jobs[0].target, "feishu")
             self.assertEqual(jobs[0].status, "blocked")
+
+
+    def test_memory_store_finds_latest_successful_publication(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+            )
+            store = MemoryStore(config)
+            document_path = config.knowledge_dir / "general" / "example.md"
+            document_path.parent.mkdir(parents=True)
+            document_path.write_text("# Example\n", encoding="utf-8")
+            store.append_publication_job(
+                PublicationJob(
+                    document_path=str(document_path),
+                    target="feishu",
+                    status="blocked",
+                    local_content_hash="old",
+                )
+            )
+            published = PublicationJob(
+                document_path=str(document_path),
+                target="feishu",
+                status="published",
+                local_content_hash="new",
+                target_document_id="doc-123",
+            )
+            store.append_publication_job(published)
+
+            found = store.latest_successful_publication(document_path, "feishu")
+
+            self.assertIsNotNone(found)
+            assert found is not None
+            self.assertEqual(found.target_document_id, "doc-123")
+            self.assertEqual(found.local_content_hash, "new")
+
+
+    def test_published_job_upserts_publication_mapping(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+            )
+            store = MemoryStore(config)
+            document_path = config.knowledge_dir / "general" / "example.md"
+            document_path.parent.mkdir(parents=True)
+            document_path.write_text("# Example\n", encoding="utf-8")
+            store.append_publication_job(
+                PublicationJob(
+                    document_path=str(document_path),
+                    target="feishu",
+                    status="published",
+                    local_path=str(document_path),
+                    local_content_hash="hash-1",
+                    target_document_id="doc-123",
+                    target_url="https://example.feishu.cn/docx/doc-123",
+                    completed_at="2026-07-03T00:00:00+00:00",
+                )
+            )
+
+            mapping = store.get_publication_mapping(document_path, "feishu")
+
+            self.assertIsNotNone(mapping)
+            assert mapping is not None
+            self.assertEqual(mapping.target_document_id, "doc-123")
+            self.assertEqual(mapping.last_published_hash, "hash-1")
+
+    def test_latest_successful_publication_prefers_mapping(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+            )
+            store = MemoryStore(config)
+            document_path = config.knowledge_dir / "general" / "example.md"
+            document_path.parent.mkdir(parents=True)
+            document_path.write_text("# Example\n", encoding="utf-8")
+            store.append_publication_job(
+                PublicationJob(
+                    document_path=str(document_path),
+                    target="feishu",
+                    status="published",
+                    local_content_hash="job-hash",
+                    target_document_id="doc-from-job",
+                )
+            )
+            store.upsert_publication_mapping(
+                PublicationMapping(
+                    local_path=str(document_path),
+                    target="feishu",
+                    local_content_hash="mapping-hash",
+                    target_document_id="doc-from-mapping",
+                )
+            )
+
+            found = store.latest_successful_publication(document_path, "feishu")
+
+            self.assertIsNotNone(found)
+            assert found is not None
+            self.assertEqual(found.target_document_id, "doc-from-mapping")
+            self.assertEqual(found.local_content_hash, "mapping-hash")
 
     def test_memory_store_identifies_approved_knowledge_documents(self) -> None:
         from tempfile import TemporaryDirectory

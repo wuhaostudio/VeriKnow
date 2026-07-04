@@ -158,13 +158,21 @@ veriknow reverify data/knowledge/general/example.md
 
 Re-verification creates a new run, fresh evidence, verification artifacts, a report, and a proposed patch. It does not overwrite the knowledge document; use `veriknow apply <run_id>` after reviewing the patch.
 
+Replay a local evaluation fixture or run artifact directory:
+
+```bash
+veriknow eval tests/fixtures/phase13_metadata_eval.json
+veriknow eval data/runs/<run_id>
+```
+
 Publish an approved local knowledge document to Feishu:
 
 ```bash
 veriknow publish data/knowledge/general/example.md --target feishu
+veriknow publish data/knowledge/general/example.md --target feishu --update
 ```
 
-The document must come from an approved `veriknow apply <run_id>` result. Draft reports in `data/runs` and unapproved Markdown files are rejected.
+The document must come from an approved `veriknow apply <run_id>` result. Draft reports in `data/runs` and unapproved Markdown files are rejected. Update mode reuses the stored publication mapping, skips unchanged local content by hash, and records blocked or failed remote updates without modifying local Markdown.
 
 ## Inspect Local Memory
 
@@ -172,6 +180,7 @@ The document must come from an approved `veriknow apply <run_id>` result. Draft 
 veriknow memory runs
 veriknow memory show <run_id>
 veriknow memory publications
+veriknow memory publication-mappings
 ```
 
 Append a task-relevant preference signal:
