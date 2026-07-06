@@ -63,6 +63,17 @@ class ComputerUseObservation:
     observations: list[str] = field(default_factory=list)
 
 
+def _observed_form_count(observations: list[str]) -> int:
+    for observation in observations:
+        if observation.startswith("form_count="):
+            raw_count = observation.split("=", 1)[1]
+            try:
+                return int(raw_count)
+            except ValueError:
+                return 0
+    return 0
+
+
 class ComputerUseVerifier:
     def __init__(
         self,
@@ -140,10 +151,24 @@ class ComputerUseVerifier:
 
         if runtime_observation.observations:
             observations.extend(runtime_observation.observations)
-        reason = self._result_message(runtime_observation)
-        self._write_log(log_path, url, expected_result, actions, observations, runtime_observation.status, reason)
+
+        status = runtime_observation.status
+        runtime_observations = runtime_observation.observations or []
+        runtime_text = " ".join(runtime_observations)
+        form_count = _observed_form_count(runtime_observations)
+        runtime_approval_reason = self.safety.approval_reason(runtime_text) if form_count else None
+        if self.safety.require_approval_for_forms and form_count and not allow_approval_required:
+            status = "blocked"
+            reason = "Computer-use runtime observed an interactive form that requires explicit approval."
+        elif runtime_approval_reason and not allow_approval_required:
+            status = "blocked"
+            reason = f"Computer-use runtime observed content requiring approval because {runtime_approval_reason}."
+        else:
+            reason = self._result_message(runtime_observation)
+
+        self._write_log(log_path, url, expected_result, actions, observations, status, reason)
         return ComputerUseObservation(
-            status=runtime_observation.status,
+            status=status,
             actual_result=reason,
             screenshot_path=runtime_observation.screenshot_path,
             log_path=str(log_path),
@@ -185,4 +210,3 @@ class ComputerUseVerifier:
         lines.extend(f"action={action}" for action in actions)
         lines.extend(f"observation={observation}" for observation in observations)
         log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-

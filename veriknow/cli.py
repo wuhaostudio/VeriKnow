@@ -782,7 +782,12 @@ def _computer_use_verifier(config, runtime_override: str | None = None) -> Compu
         store_screenshots=config.computer_use_store_screenshots,
         require_approval_for_forms=config.computer_use_require_approval_for_forms,
     )
-    runtime = create_computer_runtime(runtime_override or config.computer_use_runtime)
+    runtime = create_computer_runtime(
+        runtime_override or config.computer_use_runtime,
+        max_steps=config.computer_use_max_steps,
+        max_seconds=config.computer_use_max_seconds,
+        store_screenshots=config.computer_use_store_screenshots,
+    )
     return ComputerUseVerifier(safety, runtime)
 
 def _write_llm_artifact(run_dir: Path, name: str, payload: dict) -> Path:
