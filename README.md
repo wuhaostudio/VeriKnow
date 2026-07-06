@@ -116,6 +116,7 @@ Run computer-use verification through the safety boundary:
 
 ```bash
 veriknow verify <run_id> --mode computer-use
+veriknow verify <run_id> --mode computer-use --computer-use-runtime playwright
 ```
 
 Computer-use mode requires allowed domains in config. It records actions, observations, logs, and screenshots when the step is allowed. Login, payment, destructive, and account-change actions remain behind explicit approval.
@@ -208,6 +209,7 @@ Computer-use safety keys:
 ```yaml
 computer_use_domain_allowlist: "docs.langchain.com,github.com"
 computer_use_approval_keywords: "login,sign in,password,billing,payment,purchase,delete,destructive,account change,account settings"
+computer_use_action_allowlist: "open,screenshot,observe,scroll,wait,finish,fail"
 ```
 
 Scheduled re-verification:
@@ -336,6 +338,6 @@ The local-first MVP workflow is complete and covered by tests. The current build
 Remaining enhancement areas:
 
 - Live web-search backend.
-- Real isolated browser or VM runtime for computer-use verification.
+- Stronger isolated browser or VM runtime and model-driven action proposals for computer-use verification.
 - Cron or scheduler integration around `veriknow stale`.
 - Richer source freshness metadata and confidence policies.

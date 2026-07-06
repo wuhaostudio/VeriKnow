@@ -781,6 +781,7 @@ def _computer_use_verifier(config, runtime_override: str | None = None) -> Compu
         read_only=config.computer_use_read_only,
         store_screenshots=config.computer_use_store_screenshots,
         require_approval_for_forms=config.computer_use_require_approval_for_forms,
+        action_allowlist=config.computer_use_action_allowlist,
     )
     runtime = create_computer_runtime(
         runtime_override or config.computer_use_runtime,

@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from veriknow.tools.computer_runtime import ComputerRuntime, TraceOnlyRuntime
+from veriknow.tools.computer_runtime import ComputerAction, ComputerRuntime, TraceOnlyRuntime
 
+
+DEFAULT_ACTION_ALLOWLIST = ("open", "screenshot", "observe", "scroll", "wait", "finish", "fail")
+READ_ONLY_BLOCKED_ACTIONS = ("click", "type", "upload", "submit")
 
 DEFAULT_APPROVAL_KEYWORDS = (
     "login",
@@ -30,6 +33,7 @@ class ComputerUseSafetyConfig:
     read_only: bool = True
     store_screenshots: bool = True
     require_approval_for_forms: bool = True
+    action_allowlist: tuple[str, ...] = DEFAULT_ACTION_ALLOWLIST
 
     def is_domain_allowed(self, url: str) -> bool:
         host = urlparse(url).hostname
@@ -43,6 +47,22 @@ class ComputerUseSafetyConfig:
             if normalized_host == normalized_domain or normalized_host.endswith(f".{normalized_domain}"):
                 return True
         return False
+
+    def validate_action(self, action: ComputerAction) -> str:
+        normalized = action.action.strip().lower()
+        allowed = {item.lower().strip() for item in self.action_allowlist if item.strip()}
+        if not normalized:
+            return "blocked: empty action"
+        if allowed and normalized not in allowed:
+            return f"blocked: action not in allowlist: {action.action}"
+        if self.read_only and normalized in READ_ONLY_BLOCKED_ACTIONS:
+            return f"blocked: read-only runtime disallows {action.action}"
+        if action.requires_approval:
+            return "blocked: action proposal requires explicit approval"
+        reason = self.approval_reason(f"{action.target} {action.text} {action.reason}")
+        if reason:
+            return f"blocked: {reason}"
+        return "allowed"
 
     def approval_reason(self, text: str) -> str | None:
         lowered = text.lower()
@@ -96,10 +116,10 @@ class ComputerUseVerifier:
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        action_plan = self._build_action_plan(url, expected_result)
         actions = [
             "open isolated computer-use browser",
-            f"navigate to {url}",
-            f"observe expected result: {expected_result}",
+            *[f"proposal {action.action}: {action.target or action.reason}" for action in action_plan],
         ]
         observations = [
             f"instruction={instruction}",
@@ -108,6 +128,7 @@ class ComputerUseVerifier:
             f"read_only={self.safety.read_only}",
             f"max_steps={self.safety.max_steps}",
             f"max_seconds={self.safety.max_seconds}",
+            "action_allowlist=" + ",".join(self.safety.action_allowlist),
         ]
 
         if not self.safety.is_domain_allowed(url):
@@ -133,12 +154,27 @@ class ComputerUseVerifier:
                 observations=observations,
             )
 
+        for action in action_plan:
+            decision = self.safety.validate_action(action)
+            observations.append(f"safety_decision={action.action}:{decision}")
+            if decision.startswith("blocked") and not allow_approval_required:
+                reason = f"Computer-use action was blocked by safety policy: {decision}."
+                self._write_log(log_path, url, expected_result, actions, observations, "blocked", reason)
+                return ComputerUseObservation(
+                    status="blocked",
+                    actual_result=reason,
+                    log_path=str(log_path),
+                    actions=actions,
+                    observations=observations,
+                )
+
         try:
             runtime_observation = self.runtime.inspect_url(
                 url,
                 expected_result=expected_result,
                 screenshot_path=screenshot_path,
                 log_path=log_path,
+                action_plan=action_plan,
             )
         except Exception as exc:
             runtime_observation = TraceOnlyRuntime().inspect_url(
@@ -146,6 +182,7 @@ class ComputerUseVerifier:
                 expected_result=expected_result,
                 screenshot_path=screenshot_path,
                 log_path=log_path,
+                action_plan=action_plan,
             )
             observations.append(f"runtime error: {exc.__class__.__name__}: {exc}")
 
@@ -175,6 +212,24 @@ class ComputerUseVerifier:
             actions=actions,
             observations=observations,
         )
+
+    def _build_action_plan(self, url: str, expected_result: str) -> list[ComputerAction]:
+        actions = [
+            ComputerAction("open", target=url, reason="navigate to verification source URL"),
+        ]
+        if self.safety.store_screenshots:
+            actions.append(ComputerAction("screenshot", reason="capture page after navigation"))
+        actions.append(
+            ComputerAction(
+                "observe",
+                target="body",
+                reason=f"compare public page content with: {expected_result}",
+            )
+        )
+        if self.safety.store_screenshots:
+            actions.append(ComputerAction("scroll", target="page", reason="inspect additional public content"))
+        actions.append(ComputerAction("finish", reason="record final verification status"))
+        return actions[: self.safety.max_steps]
 
     def _result_message(self, observation) -> str:
         if observation.status == "passed":

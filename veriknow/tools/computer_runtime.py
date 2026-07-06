@@ -10,6 +10,31 @@ from veriknow.tools.browser import PLACEHOLDER_PNG
 
 
 @dataclass(frozen=True)
+class ComputerAction:
+    action: str
+    target: str = ""
+    text: str = ""
+    reason: str = ""
+    requires_approval: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "action": self.action,
+            "target": self.target,
+            "text": self.text,
+            "reason": self.reason,
+            "requires_approval": self.requires_approval,
+        }
+
+    def to_observation_line(self) -> str:
+        return "action_proposal=" + json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeActionTrace:
     index: int
     action: str
@@ -59,6 +84,7 @@ class ComputerRuntime(Protocol):
         expected_result: str,
         screenshot_path: Path,
         log_path: Path,
+        action_plan: list[ComputerAction] | None = None,
     ) -> RuntimeObservation:
         ...
 
@@ -73,6 +99,7 @@ class TraceOnlyRuntime:
         expected_result: str,
         screenshot_path: Path,
         log_path: Path,
+        action_plan: list[ComputerAction] | None = None,
     ) -> RuntimeObservation:
         screenshot_path.write_bytes(PLACEHOLDER_PNG)
         traces = [
@@ -109,6 +136,7 @@ class TraceOnlyRuntime:
             observations=[
                 "computer-use runtime is not configured; traceable boundary recorded",
                 f"expected_result={expected_result}",
+                *[action.to_observation_line() for action in action_plan or []],
                 *[trace.to_observation_line() for trace in traces],
             ],
             action_traces=traces,
@@ -140,11 +168,17 @@ class PlaywrightComputerRuntime:
         expected_result: str,
         screenshot_path: Path,
         log_path: Path,
+        action_plan: list[ComputerAction] | None = None,
     ) -> RuntimeObservation:
         from playwright.sync_api import sync_playwright
 
         started = time.monotonic()
         traces: list[RuntimeActionTrace] = []
+        action_plan = action_plan or [
+            ComputerAction("open", target=url, reason="navigate to verification source URL"),
+            ComputerAction("screenshot", target=str(screenshot_path), reason="capture public page"),
+            ComputerAction("finish", reason="finish read-only inspection"),
+        ]
 
         def add_trace(
             action: str,
@@ -276,6 +310,7 @@ class PlaywrightComputerRuntime:
                 f"elapsed_seconds={elapsed:.2f}",
                 f"action_count={len(traces)}",
                 f"form_count={form_count}",
+                *[action.to_observation_line() for action in action_plan],
                 *[trace.to_observation_line() for trace in traces],
             ],
             action_traces=traces,

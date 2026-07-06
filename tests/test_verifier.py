@@ -43,6 +43,7 @@ class FakeComputerRuntime:
         expected_result: str,
         screenshot_path: Path,
         log_path: Path,
+        action_plan=None,
     ) -> RuntimeObservation:
         screenshot_path.write_bytes(b"fake computer screenshot")
         return RuntimeObservation(
@@ -66,6 +67,7 @@ class RiskyComputerRuntime:
         expected_result: str,
         screenshot_path: Path,
         log_path: Path,
+        action_plan=None,
     ) -> RuntimeObservation:
         screenshot_path.write_bytes(b"fake risky screenshot")
         return RuntimeObservation(
@@ -261,3 +263,36 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(run.status, "blocked")
             self.assertEqual(run.results[0].status, "blocked")
             self.assertIn("explicit approval", run.results[0].actual_result)
+
+    def test_computer_use_blocks_action_not_in_allowlist(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            plan = VerificationPlan(
+                task_id="run-test",
+                steps=[
+                    VerificationStep(
+                        description="Open documentation",
+                        expected_result="URL: https://example.com/docs",
+                        method="computer-use",
+                    )
+                ],
+            )
+            computer_use = ComputerUseVerifier(
+                ComputerUseSafetyConfig(
+                    allowed_domains=("example.com",),
+                    action_allowlist=("open",),
+                ),
+                FakeComputerRuntime(),
+            )
+
+            run = Verifier(FakeBrowser(), computer_use).verify(
+                plan,
+                run_dir=Path(directory),
+                mode="computer-use",
+            )
+
+            self.assertEqual(run.status, "blocked")
+            self.assertEqual(run.results[0].status, "blocked")
+            self.assertIn("action not in allowlist", run.results[0].actual_result)
+            self.assertTrue(any("safety_decision=screenshot:blocked" in item for item in run.results[0].observations))

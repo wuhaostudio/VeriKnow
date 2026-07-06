@@ -29,6 +29,7 @@ class ConfigTests(unittest.TestCase):
                         "computer_use_read_only: true",
                         "computer_use_store_screenshots: false",
                         "computer_use_require_approval_for_forms: false",
+                        "computer_use_action_allowlist: open,observe,finish",
                         "default_reverify_interval_days: 14",
                         "model_provider: stub",
                         "model_name: glm-test",
@@ -70,6 +71,7 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config.computer_use_read_only)
             self.assertFalse(config.computer_use_store_screenshots)
             self.assertFalse(config.computer_use_require_approval_for_forms)
+            self.assertEqual(config.computer_use_action_allowlist, ("open", "observe", "finish"))
             self.assertEqual(config.default_reverify_interval_days, 14)
             self.assertEqual(config.model_provider, "stub")
             self.assertEqual(config.model_name, "glm-test")

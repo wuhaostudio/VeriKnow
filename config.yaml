@@ -5,6 +5,7 @@ default_output_format: markdown
 default_publish_target: local
 computer_use_domain_allowlist: ""
 computer_use_approval_keywords: "login,sign in,password,billing,payment,purchase,delete,destructive,account change,account settings"
+computer_use_action_allowlist: "open,screenshot,observe,scroll,wait,finish,fail"
 default_reverify_interval_days: 30
 model_provider: zhipu
 model_name: glm-5.2

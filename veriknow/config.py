@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "computer_use_read_only": True,
     "computer_use_store_screenshots": True,
     "computer_use_require_approval_for_forms": True,
+    "computer_use_action_allowlist": "open,screenshot,observe,scroll,wait,finish,fail",
     "default_reverify_interval_days": 30,
     "model_provider": "zhipu",
     "model_name": "glm-5.2",
@@ -64,6 +65,7 @@ class Config:
     computer_use_read_only: bool = True
     computer_use_store_screenshots: bool = True
     computer_use_require_approval_for_forms: bool = True
+    computer_use_action_allowlist: tuple[str, ...] = ()
     default_reverify_interval_days: int = 30
     model_provider: str = "zhipu"
     model_name: str = "glm-5.2"
@@ -154,6 +156,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             values.get(
                 "computer_use_require_approval_for_forms",
                 DEFAULT_CONFIG["computer_use_require_approval_for_forms"],
+            )
+        ),
+        computer_use_action_allowlist=_parse_csv_setting(
+            values.get(
+                "computer_use_action_allowlist",
+                DEFAULT_CONFIG["computer_use_action_allowlist"],
             )
         ),
         default_reverify_interval_days=int(
