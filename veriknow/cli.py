@@ -20,6 +20,7 @@ from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESE
 from veriknow.modules.verifier import Verifier
 from veriknow.schemas import EvidenceBundle, EvidenceClaim, VerificationPlan
 from veriknow.tools.claims import AIClaimExtractor, detect_claim_conflicts, extract_claims
+from veriknow.tools.computer_agent import create_computer_action_agent
 from veriknow.tools.computer_runtime import create_computer_runtime
 from veriknow.tools.computer_use import ComputerUseSafetyConfig, ComputerUseVerifier
 from veriknow.tools.web_fetch import fetch_documents
@@ -789,7 +790,9 @@ def _computer_use_verifier(config, runtime_override: str | None = None) -> Compu
         max_seconds=config.computer_use_max_seconds,
         store_screenshots=config.computer_use_store_screenshots,
     )
-    return ComputerUseVerifier(safety, runtime)
+    llm = create_llm_client(config) if config.computer_use_action_agent.strip().lower() == "ai" else None
+    action_agent = create_computer_action_agent(config.computer_use_action_agent, llm=llm)
+    return ComputerUseVerifier(safety, runtime, action_agent)
 
 def _write_llm_artifact(run_dir: Path, name: str, payload: dict) -> Path:
     llm_dir = run_dir / "llm"

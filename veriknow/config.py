@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
     "computer_use_store_screenshots": True,
     "computer_use_require_approval_for_forms": True,
     "computer_use_action_allowlist": "open,screenshot,observe,scroll,wait,finish,fail",
+    "computer_use_action_agent": "deterministic",
     "default_reverify_interval_days": 30,
     "model_provider": "zhipu",
     "model_name": "glm-5.2",
@@ -66,6 +67,7 @@ class Config:
     computer_use_store_screenshots: bool = True
     computer_use_require_approval_for_forms: bool = True
     computer_use_action_allowlist: tuple[str, ...] = ()
+    computer_use_action_agent: str = "deterministic"
     default_reverify_interval_days: int = 30
     model_provider: str = "zhipu"
     model_name: str = "glm-5.2"
@@ -163,6 +165,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
                 "computer_use_action_allowlist",
                 DEFAULT_CONFIG["computer_use_action_allowlist"],
             )
+        ),
+        computer_use_action_agent=str(
+            values.get("computer_use_action_agent", DEFAULT_CONFIG["computer_use_action_agent"])
         ),
         default_reverify_interval_days=int(
             values.get(

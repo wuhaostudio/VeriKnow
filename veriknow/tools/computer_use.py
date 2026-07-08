@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from veriknow.tools.computer_agent import ComputerActionAgent, DeterministicComputerActionAgent
 from veriknow.tools.computer_runtime import ComputerAction, ComputerRuntime, TraceOnlyRuntime
 
 
@@ -99,9 +100,11 @@ class ComputerUseVerifier:
         self,
         safety: ComputerUseSafetyConfig | None = None,
         runtime: ComputerRuntime | None = None,
+        action_agent: ComputerActionAgent | None = None,
     ):
         self.safety = safety or ComputerUseSafetyConfig()
         self.runtime = runtime or TraceOnlyRuntime()
+        self.action_agent = action_agent or DeterministicComputerActionAgent()
 
     def verify_step(
         self,
@@ -116,7 +119,14 @@ class ComputerUseVerifier:
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        action_plan = self._build_action_plan(url, expected_result)
+        action_plan_result = self.action_agent.plan_actions(
+            url,
+            instruction=instruction,
+            expected_result=expected_result,
+            max_steps=self.safety.max_steps,
+            store_screenshots=self.safety.store_screenshots,
+        )
+        action_plan = action_plan_result.actions
         actions = [
             "open isolated computer-use browser",
             *[f"proposal {action.action}: {action.target or action.reason}" for action in action_plan],
@@ -129,6 +139,7 @@ class ComputerUseVerifier:
             f"max_steps={self.safety.max_steps}",
             f"max_seconds={self.safety.max_seconds}",
             "action_allowlist=" + ",".join(self.safety.action_allowlist),
+            *action_plan_result.observations,
         ]
 
         if not self.safety.is_domain_allowed(url):
@@ -212,24 +223,6 @@ class ComputerUseVerifier:
             actions=actions,
             observations=observations,
         )
-
-    def _build_action_plan(self, url: str, expected_result: str) -> list[ComputerAction]:
-        actions = [
-            ComputerAction("open", target=url, reason="navigate to verification source URL"),
-        ]
-        if self.safety.store_screenshots:
-            actions.append(ComputerAction("screenshot", reason="capture page after navigation"))
-        actions.append(
-            ComputerAction(
-                "observe",
-                target="body",
-                reason=f"compare public page content with: {expected_result}",
-            )
-        )
-        if self.safety.store_screenshots:
-            actions.append(ComputerAction("scroll", target="page", reason="inspect additional public content"))
-        actions.append(ComputerAction("finish", reason="record final verification status"))
-        return actions[: self.safety.max_steps]
 
     def _result_message(self, observation) -> str:
         if observation.status == "passed":

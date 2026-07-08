@@ -121,6 +121,8 @@ veriknow verify <run_id> --mode computer-use --computer-use-runtime playwright
 
 Computer-use mode requires allowed domains in config. It records actions, observations, logs, and screenshots when the step is allowed. Login, payment, destructive, and account-change actions remain behind explicit approval.
 
+By default, computer-use verification uses a deterministic read-only action agent. Set `computer_use_action_agent: ai` to let the configured model propose the action plan first; proposed actions are still validated by the same domain allowlist, read-only policy, action allowlist, and approval keyword checks before any runtime execution.
+
 Generate a Markdown report:
 
 ```bash
