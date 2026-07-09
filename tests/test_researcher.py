@@ -6,7 +6,15 @@ from veriknow.config import Config
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.normalizer import RequirementNormalizer
 from veriknow.modules.researcher import AIResearcher, Researcher
-from veriknow.tools.web_search import BraveSearchProvider, SearchProviderError, SearchResult, create_search_provider, WebSearchProvider
+from veriknow.tools.web_search import (
+    BraveSearchProvider,
+    HybridSearchProvider,
+    SearchProviderError,
+    SearchResult,
+    SerpApiSearchProvider,
+    WebSearchProvider,
+    create_search_provider,
+)
 
 
 class FakeProvider(WebSearchProvider):
@@ -23,6 +31,16 @@ class FakeProvider(WebSearchProvider):
                 source_type="official_doc",
             ),
         ][:limit]
+
+
+class FailingProvider(WebSearchProvider):
+    provider = "failing"
+
+    def __init__(self, code: str = "failed"):
+        self.code = code
+
+    def search(self, query: str, *, limit: int = 5) -> list[SearchResult]:
+        raise SearchProviderError(self.code, "provider failed")
 
 
 class ResearcherTests(unittest.TestCase):
@@ -132,6 +150,197 @@ class ResearcherTests(unittest.TestCase):
             BraveSearchProvider("")
 
         self.assertEqual(context.exception.code, "missing_api_key")
+
+    def test_serpapi_search_provider_maps_organic_results(self) -> None:
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "organic_results": [
+                            {
+                                "position": 1,
+                                "title": "Project documentation",
+                                "link": "https://docs.example.com/guide",
+                                "snippet": "Official guide.",
+                                "date": "Jul 1, 2026",
+                                "displayed_link": "docs.example.com",
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            calls.append((request, timeout))
+            return FakeResponse()
+
+        import unittest.mock
+
+        with unittest.mock.patch("urllib.request.urlopen", fake_urlopen):
+            results = SerpApiSearchProvider("search-key", timeout_seconds=4).search(
+                "example query",
+                limit=2,
+            )
+
+        self.assertEqual(results[0].title, "Project documentation")
+        self.assertEqual(results[0].url, "https://docs.example.com/guide")
+        self.assertEqual(results[0].source_type, "official_doc")
+        self.assertEqual(results[0].published_at, "Jul 1, 2026")
+        self.assertEqual(results[0].updated_at, "Jul 1, 2026")
+        self.assertEqual(results[0].raw["position"], 1)
+        self.assertIn("engine=google", calls[0][0].full_url)
+        self.assertIn("q=example+query", calls[0][0].full_url)
+        self.assertIn("api_key=search-key", calls[0][0].full_url)
+        self.assertEqual(calls[0][1], 4)
+
+    def test_serpapi_search_provider_requires_key(self) -> None:
+        with self.assertRaises(SearchProviderError) as context:
+            SerpApiSearchProvider("")
+
+        self.assertEqual(context.exception.code, "missing_api_key")
+
+    def test_create_search_provider_supports_serpapi_env_key(self) -> None:
+        from tempfile import TemporaryDirectory
+        import unittest.mock
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+                search_provider="serpapi",
+                search_api_key_env="TEST_SERPAPI_KEY",
+            )
+
+            with unittest.mock.patch.dict("os.environ", {"TEST_SERPAPI_KEY": "env-key"}):
+                provider = create_search_provider(config)
+
+            self.assertIsInstance(provider, SerpApiSearchProvider)
+            self.assertEqual(provider.api_key, "env-key")
+
+    def test_hybrid_search_provider_deduplicates_urls(self) -> None:
+        class FirstProvider:
+            provider = "first"
+
+            def search(self, query: str, *, limit: int = 5):
+                return [
+                    SearchResult(
+                        title="Official docs",
+                        url="https://docs.example.com/guide?utm_source=test",
+                        source_type="official_doc",
+                    ),
+                    SearchResult(
+                        title="Repository",
+                        url="https://github.com/example/project",
+                        source_type="official_github",
+                    ),
+                ]
+
+        class SecondProvider:
+            provider = "second"
+
+            def search(self, query: str, *, limit: int = 5):
+                return [
+                    SearchResult(
+                        title="Duplicate docs",
+                        url="https://docs.example.com/guide",
+                        source_type="official_doc",
+                    ),
+                    SearchResult(
+                        title="Community result",
+                        url="https://example.com/community",
+                        source_type="community",
+                    ),
+                ]
+
+        results = HybridSearchProvider([FirstProvider(), SecondProvider()]).search("example", limit=3)
+
+        self.assertEqual([result.title for result in results], ["Official docs", "Repository", "Community result"])
+
+    def test_hybrid_search_provider_continues_after_provider_failure(self) -> None:
+        provider = HybridSearchProvider([FailingProvider("network_error"), FakeProvider()])
+
+        results = provider.search("example", limit=2)
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(provider.failures[0]["provider"], "failing")
+        self.assertEqual(provider.failures[0]["code"], "network_error")
+
+    def test_hybrid_search_provider_raises_when_all_providers_fail(self) -> None:
+        provider = HybridSearchProvider([FailingProvider("network_error"), FailingProvider("api_error")])
+
+        with self.assertRaises(SearchProviderError) as context:
+            provider.search("example")
+
+        self.assertEqual(context.exception.code, "all_providers_failed")
+
+    def test_create_search_provider_supports_hybrid_with_static_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+                search_provider="hybrid",
+                search_hybrid_providers=("static",),
+            )
+
+            provider = create_search_provider(config)
+            results = provider.search("LangChain", limit=1)
+
+            self.assertIsInstance(provider, HybridSearchProvider)
+            self.assertEqual(len(results), 1)
+            self.assertIn("LangChain", results[0].title)
+
+    def test_default_hybrid_provider_falls_back_to_static_when_live_keys_are_missing(self) -> None:
+        from tempfile import TemporaryDirectory
+        import unittest.mock
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+                search_provider="hybrid",
+            )
+
+            with unittest.mock.patch.dict("os.environ", {}, clear=True):
+                provider = create_search_provider(config)
+                results = provider.search("LangChain", limit=1)
+
+            self.assertIsInstance(provider, HybridSearchProvider)
+            self.assertEqual(provider.failures[0]["provider"], "brave")
+            self.assertEqual(provider.failures[0]["code"], "missing_api_key")
+            self.assertEqual(provider.failures[1]["provider"], "serpapi")
+            self.assertEqual(provider.failures[1]["code"], "missing_api_key")
+            self.assertEqual(len(results), 1)
+            self.assertIn("LangChain", results[0].title)
+
+    def test_researcher_records_hybrid_provider_failures_as_raw_payloads(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+            )
+            task = RequirementNormalizer(config).normalize("Research LangChain latest workflow")
+            provider = HybridSearchProvider([FailingProvider("network_error"), FakeProvider()])
+            researcher = Researcher(provider)
+
+            researcher.research(task, run_id="run-test")
+
+            self.assertEqual(researcher.last_raw_search_payloads[-1]["provider"], "hybrid")
+            self.assertEqual(researcher.last_raw_search_payloads[-1]["failures"][0]["code"], "network_error")
 
 
 class FakeResearchLLM:

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from veriknow.config import Config
-from veriknow.llm import LLMProviderError, StubLLMClient, ZhipuLLMClient, create_llm_client
+from veriknow.llm import BigModelLLMClient, LLMProviderError, StubLLMClient, ZhipuLLMClient, create_llm_client
 
 
 class FakeUrlopenResponse:
@@ -39,11 +39,11 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(result.provider, "stub")
         self.assertEqual(client.classify("Pick one", ["first", "second"]), "first")
 
-    def test_zhipu_check_blocks_without_api_key(self) -> None:
+    def test_bigmodel_check_blocks_without_api_key(self) -> None:
         config = Config(
             data_dir=Path("data"),
             database_path=Path("data/memory.sqlite"),
-            model_provider="zhipu",
+            model_provider="bigmodel",
             model_api_key_env="ZHIPUAI_API_KEY",
         )
 
@@ -53,13 +53,14 @@ class LLMTests(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.status, "blocked")
         self.assertEqual(result.error_code, "missing_api_key")
+        self.assertEqual(result.provider, "bigmodel")
         self.assertIn("ZHIPUAI_API_KEY", result.message)
 
-    def test_zhipu_generate_text_posts_openai_compatible_request(self) -> None:
+    def test_bigmodel_generate_text_posts_openai_compatible_request(self) -> None:
         config = Config(
             data_dir=Path("data"),
             database_path=Path("data/memory.sqlite"),
-            model_provider="zhipu",
+            model_provider="bigmodel",
             model_name="glm-test",
             model_api_key_env="ZHIPUAI_API_KEY",
             model_base_url="https://open.bigmodel.cn/api/paas/v4",
@@ -79,7 +80,7 @@ class LLMTests(unittest.TestCase):
 
         with patch.dict("os.environ", {"ZHIPUAI_API_KEY": "test-key"}, clear=True):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-                text = ZhipuLLMClient(config).generate_text("hello")
+                text = BigModelLLMClient(config).generate_text("hello")
 
         self.assertEqual(text, "ok")
         self.assertEqual(captured["url"], "https://open.bigmodel.cn/api/paas/v4/chat/completions")
@@ -97,14 +98,27 @@ class LLMTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_llm_client(config)
 
-    def test_zhipu_generate_json_requires_object(self) -> None:
+    def test_bigmodel_generate_json_requires_object(self) -> None:
+        config = Config(
+            data_dir=Path("data"),
+            database_path=Path("data/memory.sqlite"),
+            model_provider="bigmodel",
+        )
+        client = BigModelLLMClient(config)
+
+        with patch.object(client, "generate_text", return_value="[]"):
+            with self.assertRaises(LLMProviderError):
+                client.generate_json("return json")
+
+    def test_zhipu_provider_alias_still_uses_bigmodel_client(self) -> None:
         config = Config(
             data_dir=Path("data"),
             database_path=Path("data/memory.sqlite"),
             model_provider="zhipu",
         )
-        client = ZhipuLLMClient(config)
 
-        with patch.object(client, "generate_text", return_value="[]"):
-            with self.assertRaises(LLMProviderError):
-                client.generate_json("return json")
+        client = create_llm_client(config)
+
+        self.assertIsInstance(client, BigModelLLMClient)
+        self.assertIsInstance(client, ZhipuLLMClient)
+        self.assertEqual(client.provider, "zhipu")

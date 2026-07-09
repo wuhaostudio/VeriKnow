@@ -36,7 +36,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(output["available"])
             self.assertEqual(output["status"], "available")
 
-    def test_llm_check_command_reports_missing_zhipu_key(self) -> None:
+    def test_llm_check_command_reports_missing_bigmodel_key(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as directory:
@@ -47,7 +47,7 @@ class CliTests(unittest.TestCase):
                     [
                         f"data_dir: {tmp_path / 'data'}",
                         f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
-                        "model_provider: zhipu",
+                        "model_provider: bigmodel",
                         "model_api_key_env: ZHIPUAI_API_KEY",
                     ]
                 ),
@@ -60,7 +60,7 @@ class CliTests(unittest.TestCase):
                     main(["llm", "check", "--config", str(config_path)])
 
             output = json.loads(stdout.getvalue())
-            self.assertEqual(output["provider"], "zhipu")
+            self.assertEqual(output["provider"], "bigmodel")
             self.assertFalse(output["available"])
             self.assertEqual(output["status"], "blocked")
             self.assertEqual(output["error_code"], "missing_api_key")
@@ -241,6 +241,39 @@ class CliTests(unittest.TestCase):
             raw_payloads = json.loads(raw_payloads_path.read_text(encoding="utf-8"))
             self.assertTrue(raw_payloads_path.exists())
             self.assertEqual(raw_payloads[0]["age"], "2026-01-01")
+
+    def test_research_command_hybrid_provider_records_live_provider_failures(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "search_provider: hybrid",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with patch.dict("os.environ", {}, clear=True):
+                with redirect_stdout(stdout):
+                    main(["research", "LangChain multi-agent supervisor workflow", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            run_dir = tmp_path / "data" / "runs" / output["task_id"]
+            raw_payloads_path = run_dir / "raw_search_payloads.json"
+            raw_payloads = json.loads(raw_payloads_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(output["items"])
+            self.assertTrue(raw_payloads_path.exists())
+            self.assertEqual(raw_payloads[-1]["provider"], "hybrid")
+            self.assertEqual(raw_payloads[-1]["failures"][0]["provider"], "brave")
+            self.assertEqual(raw_payloads[-1]["failures"][0]["code"], "missing_api_key")
     def test_research_command_brave_provider_requires_key(self) -> None:
         from tempfile import TemporaryDirectory
 

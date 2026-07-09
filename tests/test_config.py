@@ -45,6 +45,7 @@ class ConfigTests(unittest.TestCase):
                         "search_result_limit: 8",
                         "search_fetch_pages: true",
                         "search_store_raw_pages: true",
+                        "search_hybrid_providers: brave, serpapi, static",
                     ]
                 ),
                 encoding="utf-8",
@@ -88,3 +89,4 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.search_result_limit, 8)
             self.assertTrue(config.search_fetch_pages)
             self.assertTrue(config.search_store_raw_pages)
+            self.assertEqual(config.search_hybrid_providers, ("brave", "serpapi", "static"))

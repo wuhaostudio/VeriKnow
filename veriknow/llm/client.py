@@ -87,11 +87,10 @@ class StubLLMClient:
         return labels[0]
 
 
-class ZhipuLLMClient:
-    provider = "zhipu"
-
+class BigModelLLMClient:
     def __init__(self, config: Config):
         self.config = config
+        self.provider = config.model_provider.strip().lower() or "bigmodel"
         self.model = config.model_name
         self.base_url = config.model_base_url.rstrip("/")
         self.api_key_env = config.model_api_key_env
@@ -129,7 +128,7 @@ class ZhipuLLMClient:
             model=self.model,
             available=True,
             status="available",
-            message="Zhipu provider responded successfully.",
+            message="BigModel provider responded successfully.",
             base_url=self.base_url,
         )
 
@@ -203,28 +202,31 @@ class ZhipuLLMClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise LLMProviderError("http_error", f"Zhipu HTTP {exc.code}: {detail}") from exc
+            raise LLMProviderError("http_error", f"BigModel HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
-            raise LLMProviderError("network_error", f"Zhipu network error: {exc.reason}") from exc
+            raise LLMProviderError("network_error", f"BigModel network error: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise LLMProviderError("timeout", "Zhipu request timed out") from exc
+            raise LLMProviderError("timeout", "BigModel request timed out") from exc
 
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise LLMProviderError("invalid_json", "Zhipu response was not valid JSON") from exc
+            raise LLMProviderError("invalid_json", "BigModel response was not valid JSON") from exc
         if not isinstance(parsed, dict):
-            raise LLMProviderError("invalid_response", "Zhipu response was not a JSON object")
+            raise LLMProviderError("invalid_response", "BigModel response was not a JSON object")
 
         error = parsed.get("error")
         if isinstance(error, dict):
             code = str(error.get("code") or "api_error")
-            message = str(error.get("message") or "Zhipu API error")
+            message = str(error.get("message") or "BigModel API error")
             raise LLMProviderError(code, message)
         code = parsed.get("code")
         if code not in (None, 0, "0"):
-            raise LLMProviderError(str(code), str(parsed.get("msg") or parsed.get("message") or "Zhipu API error"))
+            raise LLMProviderError(str(code), str(parsed.get("msg") or parsed.get("message") or "BigModel API error"))
         return parsed
+
+
+ZhipuLLMClient = BigModelLLMClient
 
 
 def create_llm_client(config: Config) -> LLMClient:
@@ -232,5 +234,5 @@ def create_llm_client(config: Config) -> LLMClient:
     if provider == "stub":
         return StubLLMClient(config)
     if provider in {"zhipu", "bigmodel"}:
-        return ZhipuLLMClient(config)
+        return BigModelLLMClient(config)
     raise ValueError(f"unsupported model provider: {config.model_provider}")

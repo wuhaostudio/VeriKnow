@@ -93,9 +93,13 @@ Collect public evidence:
 ```bash
 veriknow research "LangChain multi-agent supervisor workflow"
 veriknow research "latest OpenAI Responses API tool calling" --search-provider brave
+veriknow research "latest OpenAI Responses API tool calling" --search-provider serpapi
+veriknow research "latest OpenAI Responses API tool calling" --search-provider hybrid
 ```
 
-Brave search requires an API key in `BRAVE_SEARCH_API_KEY` by default, or in the environment variable named by `search_api_key_env`. When `search_fetch_pages` is enabled, research also writes normalized page text to `data/runs/<run_id>/fetched_documents.json` and deterministic claims to `data/runs/<run_id>/extracted_claims.json`; with `search_store_raw_pages`, each fetched document records its raw HTML path.
+Brave search requires an API key in `BRAVE_SEARCH_API_KEY` by default. SerpApi search requires an API key in `SERPAPI_API_KEY` by default. Either provider can use the environment variable named by `search_api_key_env`. When `search_fetch_pages` is enabled, research also writes normalized page text to `data/runs/<run_id>/fetched_documents.json` and deterministic claims to `data/runs/<run_id>/extracted_claims.json`; with `search_store_raw_pages`, each fetched document records its raw HTML path.
+
+Hybrid search runs the configured `search_hybrid_providers` in order, deduplicates by URL, and continues when one live provider fails. Partial provider failures are written to `raw_search_payloads.json` for inspection. If every configured provider fails, the research command records the provider error instead of silently returning unrelated static results.
 
 Generate a verification plan:
 
@@ -228,14 +232,15 @@ search_api_key_env: ""
 search_result_limit: 5
 search_fetch_pages: false
 search_store_raw_pages: false
+search_hybrid_providers: "brave,serpapi,static"
 ```
 
-Set `search_provider` to `brave` for live search. Set `search_fetch_pages` to `true` to store normalized fetched page text, and set `search_store_raw_pages` to `true` to also retain raw HTML under `data/runs/<run_id>/raw_pages/`.
+Set `search_provider` to `brave`, `serpapi`, or `hybrid` for live search. Set `search_fetch_pages` to `true` to store normalized fetched page text, and set `search_store_raw_pages` to `true` to also retain raw HTML under `data/runs/<run_id>/raw_pages/`.
 
 Model provider keys:
 
 ```yaml
-model_provider: "zhipu"
+model_provider: "bigmodel"
 model_name: "glm-5.2"
 model_api_key_env: "ZHIPUAI_API_KEY"
 model_base_url: "https://open.bigmodel.cn/api/paas/v4"
@@ -244,6 +249,8 @@ model_timeout_seconds: 60
 model_max_output_tokens: 4000
 model_store_prompts: true
 ```
+
+`bigmodel` is the default model provider for mainland China usage and targets Zhipu AI's official BigModel API platform. The legacy provider name `zhipu` is still accepted as an alias.
 
 Optional Feishu publisher keys:
 
@@ -339,7 +346,7 @@ The local-first MVP workflow is complete and covered by tests. The current build
 
 Remaining enhancement areas:
 
-- Live web-search backend.
+- Additional provider-specific ranking policies.
 - Stronger isolated browser or VM runtime and model-driven action proposals for computer-use verification.
 - Cron or scheduler integration around `veriknow stale`.
 - Richer source freshness metadata and confidence policies.

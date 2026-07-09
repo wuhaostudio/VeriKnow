@@ -29,7 +29,7 @@ class Researcher:
     def research(self, task: TaskSpec, *, run_id: str, limit: int = 5) -> EvidenceBundle:
         query = self._query_for(task)
         results = self.provider.search(query, limit=limit)
-        self.last_raw_search_payloads = [result.raw for result in results if result.raw]
+        self.last_raw_search_payloads = _raw_search_payloads(self.provider, results)
         items = [self._result_to_item(result) for result in results]
         ranked_items = rank_evidence_items(items)
         return EvidenceBundle(
@@ -237,6 +237,15 @@ def add_claim_summary(
         f"{conflict_count} detected conflict(s)."
     )
     return f"{summary}{claim_summary}"
+
+
+def _raw_search_payloads(provider: WebSearchProvider, results: list[SearchResult]) -> list[dict[str, Any]]:
+    payloads = [result.raw for result in results if result.raw]
+    failures = getattr(provider, "failures", None)
+    if isinstance(failures, list) and failures:
+        payloads.append({"provider": getattr(provider, "provider", "unknown"), "failures": failures})
+    return payloads
+
 
 def _optional_string(value: Any) -> str | None:
     if value is None:

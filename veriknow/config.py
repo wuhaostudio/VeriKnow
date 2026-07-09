@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "computer_use_action_allowlist": "open,screenshot,observe,scroll,wait,finish,fail",
     "computer_use_action_agent": "deterministic",
     "default_reverify_interval_days": 30,
-    "model_provider": "zhipu",
+    "model_provider": "bigmodel",
     "model_name": "glm-5.2",
     "model_api_key_env": "ZHIPUAI_API_KEY",
     "model_base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "search_result_limit": 5,
     "search_fetch_pages": False,
     "search_store_raw_pages": False,
+    "search_hybrid_providers": "brave,serpapi,static",
 }
 
 
@@ -69,7 +70,7 @@ class Config:
     computer_use_action_allowlist: tuple[str, ...] = ()
     computer_use_action_agent: str = "deterministic"
     default_reverify_interval_days: int = 30
-    model_provider: str = "zhipu"
+    model_provider: str = "bigmodel"
     model_name: str = "glm-5.2"
     model_api_key_env: str = "ZHIPUAI_API_KEY"
     model_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
@@ -82,6 +83,7 @@ class Config:
     search_result_limit: int = 5
     search_fetch_pages: bool = False
     search_store_raw_pages: bool = False
+    search_hybrid_providers: tuple[str, ...] = ("brave", "serpapi", "static")
 
     @property
     def runs_dir(self) -> Path:
@@ -197,6 +199,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         search_store_raw_pages=_parse_bool(
             values.get("search_store_raw_pages", DEFAULT_CONFIG["search_store_raw_pages"])
+        ),
+        search_hybrid_providers=_parse_csv_setting(
+            values.get("search_hybrid_providers", DEFAULT_CONFIG["search_hybrid_providers"])
         ),
     )
 
