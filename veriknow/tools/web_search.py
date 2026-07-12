@@ -219,11 +219,10 @@ class HybridSearchProvider:
             raise ValueError("search query cannot be empty")
 
         self.failures = []
-        results: list[SearchResult] = []
-        seen_urls: set[str] = set()
+        provider_results: list[list[SearchResult]] = []
         for provider in self.providers:
             try:
-                provider_results = provider.search(normalized, limit=limit)
+                found = provider.search(normalized, limit=limit)
             except SearchProviderError as exc:
                 self.failures.append(
                     {
@@ -233,19 +232,33 @@ class HybridSearchProvider:
                     }
                 )
                 continue
-            for result in provider_results:
-                normalized_url = _normalize_url_for_dedupe(result.url)
+            provider_results.append(found)
+
+        results: list[SearchResult] = []
+        seen_urls: set[str] = set()
+        position = 0
+        while len(results) < limit:
+            found_at_position = False
+            for found in provider_results:
+                if position >= len(found):
+                    continue
+                found_at_position = True
+                result = found[position]
+                normalized_url = normalize_search_url(result.url)
                 if not normalized_url or normalized_url in seen_urls:
                     continue
                 seen_urls.add(normalized_url)
                 results.append(result)
                 if len(results) >= limit:
-                    return results
+                    break
+            if not found_at_position:
+                break
+            position += 1
 
         if not results and self.failures:
             failed = ", ".join(f"{failure['provider']}:{failure['code']}" for failure in self.failures)
             raise SearchProviderError("all_providers_failed", f"Hybrid search failed for all providers: {failed}.")
-        return results
+        return results[:limit]
 
 
 class UnavailableSearchProvider:
@@ -383,7 +396,7 @@ def _optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _normalize_url_for_dedupe(url: str) -> str:
+def normalize_search_url(url: str) -> str:
     text = url.strip()
     if not text:
         return ""

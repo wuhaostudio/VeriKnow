@@ -16,7 +16,8 @@ Given a broad or unclear request, VeriKnow can:
 6. Generate a knowledge-base patch for review.
 7. Apply approved knowledge updates.
 8. Publish approved knowledge documents to Feishu.
-9. List stale knowledge documents and re-verify them.
+9. List or batch re-verify stale knowledge documents without auto-applying patches.
+10. Inspect model latency, token usage, errors, prompt retention, and replay contracts.
 
 The project follows four rules:
 
@@ -95,11 +96,14 @@ veriknow research "LangChain multi-agent supervisor workflow"
 veriknow research "latest OpenAI Responses API tool calling" --search-provider brave
 veriknow research "latest OpenAI Responses API tool calling" --search-provider serpapi
 veriknow research "latest OpenAI Responses API tool calling" --search-provider hybrid
+veriknow research "latest OpenAI Responses API tool calling" --query-count 3
 ```
 
 Brave search requires an API key in `BRAVE_SEARCH_API_KEY` by default. SerpApi search requires an API key in `SERPAPI_API_KEY` by default. Either provider can use the environment variable named by `search_api_key_env`. When `search_fetch_pages` is enabled, research also writes normalized page text to `data/runs/<run_id>/fetched_documents.json` and deterministic claims to `data/runs/<run_id>/extracted_claims.json`; with `search_store_raw_pages`, each fetched document records its raw HTML path.
 
-Hybrid search runs the configured `search_hybrid_providers` in order, deduplicates by URL, and continues when one live provider fails. Partial provider failures are written to `raw_search_payloads.json` for inspection. If every configured provider fails, the research command records the provider error instead of silently returning unrelated static results.
+Evidence is ranked by configurable source authority, then by explicit confidence (`high`, `medium`, `low`), and then by the most recent parseable update or publication date. Each evidence item records a freshness label and confidence reason; stale sources are downgraded. Sources with missing or invalid dates remain usable but rank after otherwise equivalent dated sources.
+
+Hybrid search interleaves configured providers so the first provider cannot monopolize the result limit, deduplicates by URL, and continues when one live provider fails. Partial provider failures are written to `raw_search_payloads.json` for inspection. If every configured provider fails, the research command records the provider error instead of silently returning unrelated static results. `--query-count` enables deterministic official-documentation and release-note query variants.
 
 Generate a verification plan:
 
@@ -108,7 +112,7 @@ veriknow plan <run_id>
 veriknow plan <run_id> --strategy ai
 ```
 
-AI planning stores its prompt, seed plan, model output, fallback status, and validated plan under `data/runs/<run_id>/llm/planner.json`.
+AI planning stores its prompt policy, prompt hash, seed plan, model output, fallback status, validated plan, and common call metadata under `data/runs/<run_id>/llm/planner.json`. Common metadata includes provider, model, status, error code, latency, attempts, token usage when returned by the provider, and a reserved cost field.
 
 Run browser verification:
 
@@ -137,7 +141,10 @@ Generate a knowledge update patch without changing the knowledge base:
 
 ```bash
 veriknow curate <run_id>
+veriknow curate <run_id> --strategy ai
 ```
+
+AI curation supports validated `create`, `update`, `append`, `replace_section`, and `mark_stale` semantics. The generated patch stores proposed content and a hash of the original target. Apply is blocked if the knowledge document changed after curation, if the diff was tampered with, if source metadata was removed, or if model-declared evidence and risk are incomplete.
 
 Apply an approved patch:
 
@@ -165,12 +172,24 @@ veriknow reverify data/knowledge/general/example.md
 
 Re-verification creates a new run, fresh evidence, verification artifacts, a report, and a proposed patch. It does not overwrite the knowledge document; use `veriknow apply <run_id>` after reviewing the patch.
 
+Run a bounded scheduler-friendly batch over stale documents:
+
+```bash
+veriknow reverify-stale --max-documents 5
+veriknow reverify-stale --max-documents 5 --exclude-missing
+```
+
+The batch continues after individual document failures, emits one structured JSON summary, exits non-zero when any document fails, and never runs `apply`. Use this command directly from cron or Windows Task Scheduler. A document can override the global interval with `reverify_interval_days` in its front matter.
+
 Replay a local evaluation fixture or run artifact directory:
 
 ```bash
 veriknow eval tests/fixtures/phase13_metadata_eval.json
 veriknow eval data/runs/<run_id>
+veriknow inspect <run_id>
 ```
+
+`inspect` aggregates model call counts, failures, latency, tokens, estimated cost when available, and prompt-retention status without treating numeric token counts as credentials. `eval` checks claim replay, merge proposal integrity, model metadata, prompt privacy, and safety cases.
 
 Publish an approved local knowledge document to Feishu:
 
@@ -230,9 +249,12 @@ Search provider keys:
 search_provider: "static"
 search_api_key_env: ""
 search_result_limit: 5
+search_query_count: 1
 search_fetch_pages: false
 search_store_raw_pages: false
 search_hybrid_providers: "brave,serpapi,static"
+evidence_freshness_days: "official_doc=365,official_github=180,standard=730,vendor_blog=180,community=90,search_result=30,unknown=90"
+evidence_source_priority: "official_doc=100,official_github=90,standard=80,vendor_blog=65,community=40,search_result=20,unknown=10"
 ```
 
 Set `search_provider` to `brave`, `serpapi`, or `hybrid` for live search. Set `search_fetch_pages` to `true` to store normalized fetched page text, and set `search_store_raw_pages` to `true` to also retain raw HTML under `data/runs/<run_id>/raw_pages/`.
@@ -247,10 +269,12 @@ model_base_url: "https://open.bigmodel.cn/api/paas/v4"
 model_temperature: 0
 model_timeout_seconds: 60
 model_max_output_tokens: 4000
+model_max_retries: 1
+model_retry_backoff_seconds: 0.25
 model_store_prompts: true
 ```
 
-`bigmodel` is the default model provider for mainland China usage and targets Zhipu AI's official BigModel API platform. The legacy provider name `zhipu` is still accepted as an alias.
+`bigmodel` is the default model provider for mainland China usage and targets Zhipu AI's official BigModel API platform. The legacy provider name `zhipu` is still accepted as an alias. Transient network, HTTP 429, and HTTP 5xx failures use bounded exponential retry. Set `model_store_prompts: false` to store only a SHA-256 prompt hash and suppress explicit prompt fields and common prompt echoes.
 
 Optional Feishu publisher keys:
 
@@ -285,6 +309,8 @@ data/
       report.md
       patch.diff
       knowledge_patch.json
+      knowledge_merge_proposal.json
+      llm/
       screenshots/
       logs/
   knowledge/
@@ -301,6 +327,7 @@ title: "Tool / Method / Protocol Name"
 status: "completed | partial | blocked | failed | draft"
 verified_at: "YYYY-MM-DDTHH:MM:SS+00:00"
 next_verify_at: "YYYY-MM-DD"
+reverify_interval_days: 30
 confidence: "high | medium | low"
 sources:
   - url: "https://example.com"
@@ -340,13 +367,8 @@ UserProfile         task-relevant user preferences
 
 ## Project Status
 
-The local-first MVP workflow is complete and covered by tests. The current build uses a deterministic static search provider by default, an optional Brave live-search provider, and optional AI-assisted normalization, research extraction, and verification planning behind explicit strategy flags.
+VeriKnow 0.2.0 completes the current non-computer-use optimization roadmap and is covered by tests. The build includes deterministic or live/hybrid research, source freshness and confidence policies, bounded multi-query research, observable and privacy-aware model calls, validated section-level knowledge merge operations, scheduler-friendly stale re-verification, Feishu create/update sync, and replay evaluation.
 
 `DEVELOPMENT_PLAN.md` is retained as implementation history and a maintenance roadmap. It is not required for installing or running the project.
 
-Remaining enhancement areas:
-
-- Additional provider-specific ranking policies.
-- Stronger isolated browser or VM runtime and model-driven action proposals for computer-use verification.
-- Cron or scheduler integration around `veriknow stale`.
-- Richer source freshness metadata and confidence policies.
+The remaining major enhancement area is Computer Use: a true observation/action loop, stronger process or VM isolation, durable approval/resume checkpoints, richer locator recovery, and adversarial safety evaluation. The detailed implementation sequence remains local in `DEVELOPMENT_PLAN.md`.

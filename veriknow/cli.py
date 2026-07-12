@@ -4,21 +4,31 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-from veriknow.config import create_default_config, ensure_data_dirs, load_config
-from veriknow.llm import create_llm_client
+from veriknow.config import Config, create_default_config, ensure_data_dirs, load_config
+from veriknow.llm import (
+    LLMClient,
+    create_llm_client,
+    llm_call_metadata,
+    prompt_persistence,
+)
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.adaptive_profile import AdaptiveProfile
 from veriknow.modules.curator import AIKnowledgeCurator, KnowledgeCurator, SUPPORTED_CURATION_STRATEGIES, load_knowledge_patch
 from veriknow.modules.evaluation import evaluate_path
 from veriknow.modules.inspector import inspect_run
-from veriknow.modules.knowledge import MarkdownKnowledgeIndex, title_from_markdown
+from veriknow.modules.knowledge import (
+    MarkdownKnowledgeIndex,
+    parse_front_matter,
+    title_from_markdown,
+)
 from veriknow.modules.normalizer import AIRequirementNormalizer, RequirementNormalizer, SUPPORTED_NORMALIZER_STRATEGIES
 from veriknow.modules.planner import AIVerificationPlanner, SUPPORTED_PLANNING_STRATEGIES, VerificationPlanner, render_verification_checklist
 from veriknow.modules.publisher import publish_document
 from veriknow.modules.researcher import AIResearcher, Researcher, SUPPORTED_RESEARCH_STRATEGIES, add_claim_summary
 from veriknow.modules.verifier import Verifier
-from veriknow.schemas import EvidenceBundle, EvidenceClaim, VerificationPlan
+from veriknow.schemas import EvidenceBundle, EvidenceClaim, RunRecord, VerificationPlan
 from veriknow.tools.claims import AIClaimExtractor, detect_claim_conflicts, extract_claims
 from veriknow.tools.computer_agent import create_computer_action_agent
 from veriknow.tools.computer_runtime import create_computer_runtime
@@ -69,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
     research_parser.add_argument("query", nargs="?", help="Research query. Required unless --run-id is used.")
     research_parser.add_argument("--run-id", help="Research an existing run instead of creating a new one.")
     research_parser.add_argument("--limit", type=int, default=None, help="Maximum number of sources to keep.")
+    research_parser.add_argument(
+        "--query-count",
+        type=int,
+        default=None,
+        help="Number of deterministic search query variants to run.",
+    )
     research_parser.add_argument("--search-provider", help="Search provider override, such as static or brave.")
     research_parser.add_argument(
         "--strategy",
@@ -221,6 +237,48 @@ def build_parser() -> argparse.ArgumentParser:
     reverify_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     reverify_parser.set_defaults(handler=handle_reverify)
 
+    reverify_stale_parser = subparsers.add_parser(
+        "reverify-stale",
+        help="Re-verify due knowledge documents for cron or task schedulers.",
+    )
+    reverify_stale_parser.add_argument(
+        "--exclude-missing",
+        action="store_true",
+        help="Do not process documents without next_verify_at.",
+    )
+    reverify_stale_parser.add_argument(
+        "--max-documents",
+        type=int,
+        default=10,
+        help="Maximum stale documents to process in one batch.",
+    )
+    reverify_stale_parser.add_argument(
+        "--mode",
+        choices=["browser", "computer-use"],
+        default="browser",
+    )
+    reverify_stale_parser.add_argument(
+        "--include-approval-required",
+        action="store_true",
+        help="Execute steps marked as requiring approval.",
+    )
+    reverify_stale_parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Maximum number of sources per document.",
+    )
+    reverify_stale_parser.add_argument(
+        "--computer-use-runtime",
+        help="Computer-use runtime override, such as trace-only or playwright.",
+    )
+    reverify_stale_parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="Path to config.yaml.",
+    )
+    reverify_stale_parser.set_defaults(handler=handle_reverify_stale)
+
     return parser
 
 
@@ -240,8 +298,10 @@ def handle_run(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     ensure_data_dirs(config)
     artifact = None
+    llm_client = None
     if args.normalizer == "ai":
-        result = AIRequirementNormalizer(config, create_llm_client(config)).normalize(args.request)
+        llm_client = create_llm_client(config)
+        result = AIRequirementNormalizer(config, llm_client).normalize(args.request)
         task = result.task
         artifact = result.artifact
     else:
@@ -251,7 +311,13 @@ def handle_run(args: argparse.Namespace) -> None:
     record = store.create_run(args.request, task)
     artifacts = {}
     if artifact is not None:
-        artifact_path = _write_llm_artifact(store.run_dir(record.run_id), "normalizer", artifact.to_dict())
+        artifact_path = _write_llm_artifact(
+            store.run_dir(record.run_id),
+            "normalizer",
+            artifact.to_dict(),
+            config=config,
+            client=llm_client,
+        )
         artifacts["llm_normalizer"] = str(artifact_path)
     status = "dry_run" if args.dry_run else "created"
     record = store.update_run(record.run_id, status=status, artifacts=artifacts)
@@ -273,12 +339,30 @@ def handle_research(args: argparse.Namespace) -> None:
         task = RequirementNormalizer(config).normalize(args.query)
         record = store.create_run(args.query, task)
 
-    limit = args.limit or config.search_result_limit
+    limit = args.limit if args.limit is not None else config.search_result_limit
+    query_count = (
+        args.query_count
+        if args.query_count is not None
+        else config.search_query_count
+    )
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if query_count <= 0:
+        raise ValueError("query-count must be positive")
+    if query_count > 5:
+        raise ValueError("query-count cannot exceed 5")
     search_provider = create_search_provider(config, provider=args.search_provider)
-    researcher = Researcher(search_provider)
+    researcher = Researcher(
+        search_provider,
+        freshness_days=config.evidence_freshness_days,
+        source_priority=config.evidence_source_priority,
+        query_count=query_count,
+    )
     research_artifact = None
+    research_llm = None
     if args.strategy == "ai":
-        result = AIResearcher(create_llm_client(config), base=researcher).research(
+        research_llm = create_llm_client(config)
+        result = AIResearcher(research_llm, base=researcher).research(
             record.task,
             run_id=record.run_id,
             limit=limit,
@@ -309,15 +393,23 @@ def handle_research(args: argparse.Namespace) -> None:
         )
         artifacts["fetched_documents"] = str(fetched_path)
         claim_artifact = None
+        claim_llm = None
         if args.strategy == "ai":
-            claim_result = AIClaimExtractor(create_llm_client(config)).extract(fetched)
+            claim_llm = create_llm_client(config)
+            claim_result = AIClaimExtractor(claim_llm).extract(fetched)
             claims = claim_result.claims
             claim_artifact = claim_result.artifact
         else:
             claims = extract_claims(fetched)
         claim_conflicts = detect_claim_conflicts(claims)
         if claim_artifact is not None:
-            artifact_path = _write_llm_artifact(run_dir, "claim_extractor", claim_artifact.to_dict())
+            artifact_path = _write_llm_artifact(
+                run_dir,
+                "claim_extractor",
+                claim_artifact.to_dict(),
+                config=config,
+                client=claim_llm,
+            )
             artifacts["llm_claim_extractor"] = str(artifact_path)
         bundle.summary = add_claim_summary(
             bundle.summary,
@@ -355,7 +447,13 @@ def handle_research(args: argparse.Namespace) -> None:
         }
     )
     if research_artifact is not None:
-        artifact_path = _write_llm_artifact(store.run_dir(record.run_id), "research", research_artifact.to_dict())
+        artifact_path = _write_llm_artifact(
+            store.run_dir(record.run_id),
+            "research",
+            research_artifact.to_dict(),
+            config=config,
+            client=research_llm,
+        )
         artifacts["llm_research"] = str(artifact_path)
     store.update_run(record.run_id, status="researched", artifacts=artifacts)
     print(json.dumps(bundle.to_dict(), ensure_ascii=False, indent=2))
@@ -373,8 +471,10 @@ def handle_plan(args: argparse.Namespace) -> None:
     claims = _load_claims(record.artifacts.get("extracted_claims"))
     claim_conflicts = _load_json_list(record.artifacts.get("claim_conflicts"))
     plan_artifact = None
+    plan_llm = None
     if args.strategy == "ai":
-        result = AIVerificationPlanner(create_llm_client(config)).plan(
+        plan_llm = create_llm_client(config)
+        result = AIVerificationPlanner(plan_llm).plan(
             record.task,
             evidence,
             run_id=record.run_id,
@@ -398,7 +498,13 @@ def handle_plan(args: argparse.Namespace) -> None:
         "verification_checklist": str(checklist_path),
     }
     if plan_artifact is not None:
-        artifact_path = _write_llm_artifact(run_dir, "planner", plan_artifact.to_dict())
+        artifact_path = _write_llm_artifact(
+            run_dir,
+            "planner",
+            plan_artifact.to_dict(),
+            config=config,
+            client=plan_llm,
+        )
         artifacts["llm_planner"] = str(artifact_path)
     store.update_run(
         record.run_id,
@@ -567,13 +673,15 @@ def handle_curate(args: argparse.Namespace) -> None:
     curator = KnowledgeCurator()
     patch = curator.create_patch(record, report_path, config.knowledge_dir)
     curation_artifact = None
+    curation_llm = None
     if args.strategy == "ai":
         related_documents = curator.find_related(
             record,
             report_path.read_text(encoding="utf-8"),
             config.knowledge_dir,
         )
-        result = AIKnowledgeCurator(create_llm_client(config), base=curator).create_merge_proposal(
+        curation_llm = create_llm_client(config)
+        result = AIKnowledgeCurator(curation_llm, base=curator).create_merge_proposal(
             record,
             patch,
             report_path,
@@ -593,7 +701,13 @@ def handle_curate(args: argparse.Namespace) -> None:
         "knowledge_merge_proposal": str(proposal_path),
     }
     if curation_artifact is not None:
-        artifact_path = _write_llm_artifact(run_dir, "curator", curation_artifact.to_dict())
+        artifact_path = _write_llm_artifact(
+            run_dir,
+            "curator",
+            curation_artifact.to_dict(),
+            config=config,
+            client=curation_llm,
+        )
         artifacts["llm_curator"] = str(artifact_path)
     store.update_run(
         record.run_id,
@@ -667,10 +781,100 @@ def handle_stale(args: argparse.Namespace) -> None:
 
 def handle_reverify(args: argparse.Namespace) -> None:
     config = load_config(args.config)
+    record = _reverify_document(
+        args.document_path,
+        config=config,
+        mode=args.mode,
+        include_approval_required=args.include_approval_required,
+        limit=args.limit,
+        computer_use_runtime=args.computer_use_runtime,
+    )
+    print(json.dumps(record.to_dict(), ensure_ascii=False, indent=2))
+
+
+def handle_reverify_stale(args: argparse.Namespace) -> None:
+    if args.max_documents <= 0:
+        raise ValueError("max-documents must be positive")
+    if args.limit <= 0:
+        raise ValueError("limit must be positive")
+
+    config = load_config(args.config)
+    ensure_data_dirs(config)
+    stale_documents = MarkdownKnowledgeIndex().stale_documents(
+        config.knowledge_dir,
+        include_missing=not args.exclude_missing,
+    )
+    selected = stale_documents[: args.max_documents]
+    results: list[dict] = []
+    failed_count = 0
+    for document in selected:
+        try:
+            record = _reverify_document(
+                str(document.path),
+                config=config,
+                mode=args.mode,
+                include_approval_required=args.include_approval_required,
+                limit=args.limit,
+                computer_use_runtime=args.computer_use_runtime,
+            )
+            results.append(
+                {
+                    "document_path": str(document.path),
+                    "reason": document.reason,
+                    "status": "completed",
+                    "run_id": record.run_id,
+                    "run_status": record.status,
+                }
+            )
+        except Exception as exc:
+            failed_count += 1
+            results.append(
+                {
+                    "document_path": str(document.path),
+                    "reason": document.reason,
+                    "status": "failed",
+                    "error_code": exc.__class__.__name__,
+                    "message": str(exc),
+                }
+            )
+
+    succeeded_count = len(selected) - failed_count
+    status = "completed"
+    if failed_count:
+        status = "partial" if succeeded_count else "failed"
+    summary = {
+        "status": status,
+        "stale_count": len(stale_documents),
+        "processed_count": len(selected),
+        "succeeded_count": succeeded_count,
+        "failed_count": failed_count,
+        "remaining_count": max(0, len(stale_documents) - len(selected)),
+        "results": results,
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if failed_count:
+        raise SystemExit(1)
+
+
+def _reverify_document(
+    document_path_value: str,
+    *,
+    config: Config,
+    mode: str,
+    include_approval_required: bool,
+    limit: int,
+    computer_use_runtime: str | None,
+) -> RunRecord:
+    if limit <= 0:
+        raise ValueError("limit must be positive")
     ensure_data_dirs(config)
     store = MemoryStore(config)
-    document_path = _knowledge_document_path(args.document_path, config.knowledge_dir)
+    document_path = _knowledge_document_path(document_path_value, config.knowledge_dir)
     document_content = document_path.read_text(encoding="utf-8")
+    reverify_interval_days = _document_reverify_interval(
+        document_content,
+        default=config.default_reverify_interval_days,
+    )
     title = title_from_markdown(document_content, document_path)
     request = f"Re-verify the latest information for {title}"
     task = RequirementNormalizer(config).normalize(request)
@@ -678,7 +882,12 @@ def handle_reverify(args: argparse.Namespace) -> None:
     run_id = record.run_id
     run_dir = store.run_dir(record.run_id)
 
-    bundle = Researcher(create_search_provider(config)).research(record.task, run_id=record.run_id, limit=args.limit)
+    bundle = Researcher(
+        create_search_provider(config),
+        freshness_days=config.evidence_freshness_days,
+        source_priority=config.evidence_source_priority,
+        query_count=config.search_query_count,
+    ).research(record.task, run_id=record.run_id, limit=limit)
     evidence_path = run_dir / "evidence.json"
     evidence_path.write_text(
         json.dumps(bundle.to_dict(), ensure_ascii=False, indent=2),
@@ -723,11 +932,11 @@ def handle_reverify(args: argparse.Namespace) -> None:
     if record is None:
         raise KeyError(f"run not found: {run_id}")
 
-    verification = Verifier(computer_use=_computer_use_verifier(config, args.computer_use_runtime)).verify(
+    verification = Verifier(computer_use=_computer_use_verifier(config, computer_use_runtime)).verify(
         plan,
         run_dir=run_dir,
-        include_approval_required=args.include_approval_required,
-        mode=args.mode,
+        include_approval_required=include_approval_required,
+        mode=mode,
     )
     verification_path = run_dir / "verification.json"
     verification_path.write_text(
@@ -746,7 +955,7 @@ def handle_reverify(args: argparse.Namespace) -> None:
     report_path = write_report(
         record,
         run_dir,
-        reverify_interval_days=config.default_reverify_interval_days,
+        reverify_interval_days=reverify_interval_days,
     )
     record = store.update_run(record.run_id, artifacts={"report": str(report_path)})
     curator = KnowledgeCurator()
@@ -768,7 +977,7 @@ def handle_reverify(args: argparse.Namespace) -> None:
             "knowledge_merge_proposal": str(proposal_path),
         },
     )
-    print(json.dumps(record.to_dict(), ensure_ascii=False, indent=2))
+    return record
 
 
 
@@ -794,12 +1003,47 @@ def _computer_use_verifier(config, runtime_override: str | None = None) -> Compu
     action_agent = create_computer_action_agent(config.computer_use_action_agent, llm=llm)
     return ComputerUseVerifier(safety, runtime, action_agent)
 
-def _write_llm_artifact(run_dir: Path, name: str, payload: dict) -> Path:
+def _write_llm_artifact(
+    run_dir: Path,
+    name: str,
+    payload: dict,
+    *,
+    config: Config,
+    client: LLMClient,
+) -> Path:
     llm_dir = run_dir / "llm"
     llm_dir.mkdir(parents=True, exist_ok=True)
     path = llm_dir / f"{name}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    protected = dict(payload)
+    raw_prompt = protected.get("prompt")
+    prompt = raw_prompt if isinstance(raw_prompt, str) else ""
+    protected.update(
+        prompt_persistence(
+            prompt,
+            store_prompt=config.model_store_prompts,
+        )
+    )
+    protected["call_metadata"] = llm_call_metadata(client)
+    if not config.model_store_prompts:
+        protected["model_output"] = _remove_prompt_echo(
+            protected.get("model_output"),
+            prompt,
+        )
+    path.write_text(json.dumps(protected, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def _remove_prompt_echo(value: Any, prompt: str) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: None if str(key).lower() == "prompt" else _remove_prompt_echo(item, prompt)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_remove_prompt_echo(item, prompt) for item in value]
+    if isinstance(value, str) and prompt:
+        return value.replace(prompt, "[PROMPT NOT STORED]")
+    return value
 
 def _load_evidence(path: str | None) -> EvidenceBundle | None:
     if not path:
@@ -877,3 +1121,17 @@ def _knowledge_document_path(document_path: str, knowledge_dir: Path) -> Path:
     if path.suffix.lower() != ".md":
         raise ValueError(f"knowledge document must be Markdown: {path}")
     return path
+
+
+def _document_reverify_interval(content: str, *, default: int) -> int:
+    front_matter = parse_front_matter(content) or {}
+    raw_interval = front_matter.get("reverify_interval_days")
+    if raw_interval is None or not str(raw_interval).strip():
+        return default
+    try:
+        interval = int(str(raw_interval).strip())
+    except ValueError as exc:
+        raise ValueError("reverify_interval_days must be a positive integer") from exc
+    if interval <= 0:
+        raise ValueError("reverify_interval_days must be a positive integer")
+    return interval

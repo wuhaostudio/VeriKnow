@@ -40,6 +40,7 @@ title: {_yaml_quote(task.target)}
 status: {_yaml_quote(status)}
 verified_at: {_yaml_quote(verified_at)}
 next_verify_at: {_yaml_quote(next_verify_at)}
+reverify_interval_days: {reverify_interval_days}
 confidence: {_yaml_quote(confidence)}
 sources:
 {source_front_matter}
@@ -301,11 +302,14 @@ def _outdated_information_section(
     lines: list[str] = []
     if evidence is not None:
         for item in evidence.items:
-            if item.updated_at or item.published_at:
-                continue
-            lines.append(
-                f"- Source date unknown: [{item.title}]({item.url}). Re-check before relying on time-sensitive details."
-            )
+            if item.freshness == "stale":
+                lines.append(
+                    f"- Stale source: [{item.title}]({item.url}). Re-verify before relying on time-sensitive details."
+                )
+            elif item.freshness == "unknown" or not (item.updated_at or item.published_at):
+                lines.append(
+                    f"- Source date unknown: [{item.title}]({item.url}). Re-check before relying on time-sensitive details."
+                )
 
     if verification is not None:
         for result in verification.results:
@@ -355,8 +359,11 @@ def _sources_section(evidence: EvidenceBundle | None) -> str:
         snippet = f" - {item.snippet}" if item.snippet else ""
         lines.append(
             f"{index}. [{item.title}]({item.url}) "
-            f"({item.source_type}, confidence: {item.confidence}){snippet}"
+            f"({item.source_type}, confidence: {item.confidence}, freshness: {item.freshness})"
+            f"{snippet}"
         )
+        if item.confidence_reason:
+            lines.append(f"   - Confidence basis: {item.confidence_reason}")
     return "\n".join(lines)
 
 

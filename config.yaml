@@ -26,10 +26,15 @@ model_base_url: https://open.bigmodel.cn/api/paas/v4
 model_temperature: 0
 model_timeout_seconds: 60
 model_max_output_tokens: 4000
+model_max_retries: 1
+model_retry_backoff_seconds: 0.25
 model_store_prompts: true
 search_provider: static
 search_api_key_env: ""
 search_result_limit: 5
+search_query_count: 1
 search_fetch_pages: false
 search_store_raw_pages: false
 search_hybrid_providers: "brave,serpapi,static"
+evidence_freshness_days: "official_doc=365,official_github=180,standard=730,vendor_blog=180,community=90,search_result=30,unknown=90"
+evidence_source_priority: "official_doc=100,official_github=90,standard=80,vendor_blog=65,community=40,search_result=20,unknown=10"

@@ -64,6 +64,8 @@ class EvidenceItem(JsonModel):
     published_at: str | None = None
     updated_at: str | None = None
     confidence: str = "medium"
+    confidence_reason: str = ""
+    freshness: str = "unknown"
 
 
 @dataclass
@@ -156,6 +158,9 @@ class KnowledgePatch(JsonModel):
     run_id: str
     target_path: str
     diff: str
+    operation: str = "update"
+    proposed_content: str = ""
+    base_content_hash: str = ""
     approved: bool = False
     created_at: str = field(default_factory=now_iso)
 
@@ -170,6 +175,9 @@ class KnowledgeMergeProposal(JsonModel):
     evidence_urls: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
     diff: str = ""
+    proposed_content: str = ""
+    base_content_hash: str = ""
+    section_heading: str = ""
     risk_level: str = "medium"
     created_at: str = field(default_factory=now_iso)
 

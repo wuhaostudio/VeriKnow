@@ -103,6 +103,52 @@ class CliTests(unittest.TestCase):
             self.assertEqual(artifact["provider"], "stub")
             self.assertEqual(artifact["status"], "fallback")
             self.assertTrue(artifact["fallback_used"])
+            self.assertEqual(artifact["call_metadata"]["status"], "completed")
+            self.assertEqual(len(artifact["prompt_hash"]), 64)
+            self.assertTrue(artifact["prompt_stored"])
+
+    def test_model_store_prompts_false_suppresses_prompt_and_stub_echo(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {tmp_path / 'data'}",
+                        f"database_path: {tmp_path / 'data' / 'memory.sqlite'}",
+                        "model_provider: stub",
+                        "model_store_prompts: false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+            raw_request = "private research request"
+
+            with redirect_stdout(stdout):
+                main(
+                    [
+                        "run",
+                        raw_request,
+                        "--normalizer",
+                        "ai",
+                        "--dry-run",
+                        "--config",
+                        str(config_path),
+                    ]
+                )
+
+            output = json.loads(stdout.getvalue())
+            artifact_path = Path(output["artifacts"]["llm_normalizer"])
+            artifact_text = artifact_path.read_text(encoding="utf-8")
+            artifact = json.loads(artifact_text)
+            self.assertIsNone(artifact["prompt"])
+            self.assertFalse(artifact["prompt_stored"])
+            self.assertEqual(len(artifact["prompt_hash"]), 64)
+            self.assertNotIn("Create a VeriKnow TaskSpec", artifact_text)
+
     def test_research_command_creates_evidence_output(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -1081,6 +1127,7 @@ class CliTests(unittest.TestCase):
                 "---\n"
                 'title: "LangChain Supervisor"\n'
                 'next_verify_at: "2020-01-01"\n'
+                "reverify_interval_days: 3\n"
                 "---\n\n"
                 "# LangChain Supervisor\n\nOld workflow.\n"
             )
@@ -1109,6 +1156,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue((run_dir / "verification_plan.json").exists())
             self.assertTrue((run_dir / "verification.json").exists())
             self.assertTrue((run_dir / "report.md").exists())
+            self.assertIn(
+                "reverify_interval_days: 3",
+                (run_dir / "report.md").read_text(encoding="utf-8"),
+            )
             self.assertTrue((run_dir / "knowledge_patch.json").exists())
             proposal_path = run_dir / "knowledge_merge_proposal.json"
             proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
@@ -1118,6 +1169,100 @@ class CliTests(unittest.TestCase):
             self.assertEqual(patch["target_path"], str(knowledge_path))
             self.assertFalse(patch["approved"])
             self.assertEqual(knowledge_path.read_text(encoding="utf-8"), original)
+
+    def test_reverify_stale_batches_documents_without_applying(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            data_dir = tmp_path / "data"
+            knowledge_dir = data_dir / "knowledge"
+            original_contents = {}
+            for name, title in [
+                ("langchain.md", "LangChain"),
+                ("playwright.md", "Playwright"),
+            ]:
+                path = knowledge_dir / "general" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = (
+                    "---\n"
+                    f'title: "{title}"\n'
+                    'next_verify_at: "2020-01-01"\n'
+                    "---\n\n"
+                    f"# {title}\n\nOld content.\n"
+                )
+                path.write_text(content, encoding="utf-8")
+                original_contents[path] = content
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {data_dir}",
+                        f"database_path: {data_dir / 'memory.sqlite'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                main(
+                    [
+                        "reverify-stale",
+                        "--max-documents",
+                        "1",
+                        "--config",
+                        str(config_path),
+                    ]
+                )
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["status"], "completed")
+            self.assertEqual(output["stale_count"], 2)
+            self.assertEqual(output["processed_count"], 1)
+            self.assertEqual(output["succeeded_count"], 1)
+            self.assertEqual(output["remaining_count"], 1)
+            self.assertTrue(output["results"][0]["run_id"])
+            for path, original in original_contents.items():
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_reverify_stale_reports_failure_and_nonzero_exit(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            data_dir = tmp_path / "data"
+            knowledge_path = data_dir / "knowledge" / "general" / "example.md"
+            knowledge_path.parent.mkdir(parents=True)
+            knowledge_path.write_text(
+                "---\nnext_verify_at: \"2020-01-01\"\n---\n\n# Example\n",
+                encoding="utf-8",
+            )
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f"data_dir: {data_dir}",
+                        f"database_path: {data_dir / 'memory.sqlite'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+
+            with patch(
+                "veriknow.cli._reverify_document",
+                side_effect=ValueError("simulated failure"),
+            ):
+                with redirect_stdout(stdout):
+                    with self.assertRaises(SystemExit) as context:
+                        main(["reverify-stale", "--config", str(config_path)])
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(context.exception.code, 1)
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(output["failed_count"], 1)
+            self.assertEqual(output["results"][0]["error_code"], "ValueError")
 
     def test_curate_command_ai_strategy_writes_artifact_on_fallback(self) -> None:
         from tempfile import TemporaryDirectory

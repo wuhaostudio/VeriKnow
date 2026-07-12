@@ -1,11 +1,13 @@
 from pathlib import Path
+from datetime import date
 import json
 import unittest
 
 from veriknow.config import Config
 from veriknow.memory.store import MemoryStore
 from veriknow.modules.normalizer import RequirementNormalizer
-from veriknow.modules.researcher import AIResearcher, Researcher
+from veriknow.modules.researcher import AIResearcher, Researcher, rank_evidence_items
+from veriknow.schemas import EvidenceItem
 from veriknow.tools.web_search import (
     BraveSearchProvider,
     HybridSearchProvider,
@@ -60,6 +62,184 @@ class ResearcherTests(unittest.TestCase):
             self.assertEqual(bundle.items[0].source_type, "official_doc")
             self.assertEqual(bundle.items[0].confidence, "high")
             self.assertIn("Collected 2 public source", bundle.summary)
+
+    def test_rank_evidence_items_uses_explicit_confidence_order(self) -> None:
+        items = [
+            EvidenceItem(
+                title="Low",
+                url="https://example.com/low",
+                source_type="official_doc",
+                confidence="low",
+            ),
+            EvidenceItem(
+                title="High",
+                url="https://example.com/high",
+                source_type="official_doc",
+                confidence="high",
+            ),
+            EvidenceItem(
+                title="Medium",
+                url="https://example.com/medium",
+                source_type="official_doc",
+                confidence="medium",
+            ),
+        ]
+
+        ranked = rank_evidence_items(items)
+
+        self.assertEqual([item.confidence for item in ranked], ["high", "medium", "low"])
+
+    def test_rank_evidence_items_prefers_recent_updated_or_published_date(self) -> None:
+        items = [
+            EvidenceItem(
+                title="Older update",
+                url="https://example.com/older",
+                source_type="official_doc",
+                confidence="high",
+                published_at="2026-12-31",
+                updated_at="2025-01-01",
+            ),
+            EvidenceItem(
+                title="Published fallback",
+                url="https://example.com/published",
+                source_type="official_doc",
+                confidence="high",
+                published_at="Jul 1, 2026",
+                updated_at="recently",
+            ),
+            EvidenceItem(
+                title="Newer update",
+                url="https://example.com/newer",
+                source_type="official_doc",
+                confidence="high",
+                published_at="2020-01-01",
+                updated_at="2026-07-02T08:00:00Z",
+            ),
+        ]
+
+        ranked = rank_evidence_items(items)
+
+        self.assertEqual(
+            [item.title for item in ranked],
+            ["Newer update", "Published fallback", "Older update"],
+        )
+
+    def test_rank_evidence_items_puts_missing_or_invalid_dates_last_stably(self) -> None:
+        items = [
+            EvidenceItem(
+                title="Zulu missing",
+                url="https://example.com/zulu",
+                source_type="official_doc",
+                confidence="high",
+            ),
+            EvidenceItem(
+                title="Dated",
+                url="https://example.com/dated",
+                source_type="official_doc",
+                confidence="high",
+                updated_at="2026/07/01",
+            ),
+            EvidenceItem(
+                title="Alpha invalid",
+                url="https://example.com/alpha",
+                source_type="official_doc",
+                confidence="high",
+                updated_at="recently",
+            ),
+        ]
+
+        ranked = rank_evidence_items(items)
+
+        self.assertEqual(
+            [item.title for item in ranked],
+            ["Dated", "Alpha invalid", "Zulu missing"],
+        )
+
+    def test_researcher_labels_freshness_and_downgrades_stale_confidence(self) -> None:
+        class DatedProvider:
+            def search(self, query: str, *, limit: int = 5):
+                return [
+                    SearchResult(
+                        title="Fresh docs",
+                        url="https://example.com/fresh",
+                        source_type="official_doc",
+                        updated_at="2026-06-15",
+                    ),
+                    SearchResult(
+                        title="Stale docs",
+                        url="https://example.com/stale",
+                        source_type="official_doc",
+                        updated_at="2025-01-01",
+                    ),
+                ]
+
+        config = Config(data_dir=Path("data"), database_path=Path("data/memory.sqlite"))
+        task = RequirementNormalizer(config).normalize("Research example")
+        bundle = Researcher(
+            DatedProvider(),
+            freshness_days={"official_doc": 90, "unknown": 90},
+            as_of=date(2026, 7, 11),
+        ).research(task, run_id="run-freshness")
+
+        self.assertEqual(bundle.items[0].freshness, "fresh")
+        self.assertEqual(bundle.items[0].confidence, "high")
+        self.assertEqual(bundle.items[1].freshness, "stale")
+        self.assertEqual(bundle.items[1].confidence, "medium")
+        self.assertIn("lowers confidence", bundle.items[1].confidence_reason)
+        self.assertIn("1 fresh, 1 stale", bundle.summary)
+
+    def test_researcher_can_expand_and_deduplicate_search_queries(self) -> None:
+        class RecordingProvider:
+            def __init__(self):
+                self.queries = []
+
+            def search(self, query: str, *, limit: int = 5):
+                self.queries.append(query)
+                return [
+                    SearchResult(
+                        title=query,
+                        url=f"https://example.com/{len(self.queries)}",
+                        source_type="official_doc",
+                    )
+                ]
+
+        provider = RecordingProvider()
+        config = Config(data_dir=Path("data"), database_path=Path("data/memory.sqlite"))
+        task = RequirementNormalizer(config).normalize("Research the latest Example API")
+
+        bundle = Researcher(provider, query_count=3).research(
+            task,
+            run_id="run-queries",
+            limit=5,
+        )
+
+        self.assertEqual(len(provider.queries), 3)
+        self.assertIn("official documentation", provider.queries[1])
+        self.assertIn("latest release notes", provider.queries[2])
+        self.assertEqual(len(bundle.items), 3)
+
+    def test_rank_evidence_items_accepts_configured_source_priority(self) -> None:
+        items = [
+            EvidenceItem(
+                title="Docs",
+                url="https://example.com/docs",
+                source_type="official_doc",
+                confidence="high",
+            ),
+            EvidenceItem(
+                title="Community",
+                url="https://example.com/community",
+                source_type="community",
+                confidence="medium",
+            ),
+        ]
+
+        ranked = rank_evidence_items(
+            items,
+            source_priority={"official_doc": 10, "community": 100, "unknown": 1},
+        )
+
+        self.assertEqual(ranked[0].source_type, "community")
 
     def test_evidence_can_be_persisted_as_run_artifact(self) -> None:
         from tempfile import TemporaryDirectory
@@ -264,6 +444,30 @@ class ResearcherTests(unittest.TestCase):
 
         self.assertEqual([result.title for result in results], ["Official docs", "Repository", "Community result"])
 
+    def test_hybrid_search_provider_interleaves_provider_results(self) -> None:
+        class Provider:
+            def __init__(self, name: str):
+                self.provider = name
+
+            def search(self, query: str, *, limit: int = 5):
+                return [
+                    SearchResult(
+                        title=f"{self.provider}-{index}",
+                        url=f"https://{self.provider}.example.com/{index}",
+                    )
+                    for index in range(limit)
+                ]
+
+        results = HybridSearchProvider([Provider("first"), Provider("second")]).search(
+            "example",
+            limit=4,
+        )
+
+        self.assertEqual(
+            [result.title for result in results],
+            ["first-0", "second-0", "first-1", "second-1"],
+        )
+
     def test_hybrid_search_provider_continues_after_provider_failure(self) -> None:
         provider = HybridSearchProvider([FailingProvider("network_error"), FakeProvider()])
 
@@ -418,3 +622,38 @@ class AIResearcherTests(unittest.TestCase):
             self.assertIsNotNone(result.artifact)
             self.assertEqual(result.artifact.status, "fallback")
             self.assertTrue(result.artifact.fallback_used)
+
+    def test_ai_researcher_rejects_urls_not_present_in_seed_evidence(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            config = Config(
+                data_dir=tmp_path / "data",
+                database_path=tmp_path / "data" / "memory.sqlite",
+            )
+            task = RequirementNormalizer(config).normalize("Research example")
+            llm = FakeResearchLLM(
+                {
+                    "summary": "Invented source",
+                    "items": [
+                        {
+                            "title": "Invented",
+                            "url": "https://invented.example.com/docs",
+                            "source_type": "official_doc",
+                        }
+                    ],
+                }
+            )
+
+            result = AIResearcher(llm, base=Researcher(FakeProvider())).research(
+                task,
+                run_id="run-ai",
+            )
+
+            self.assertEqual(result.artifact.status, "fallback")
+            self.assertTrue(result.artifact.fallback_used)
+            self.assertNotEqual(
+                result.bundle.items[0].url,
+                "https://invented.example.com/docs",
+            )

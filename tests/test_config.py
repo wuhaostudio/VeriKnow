@@ -39,13 +39,18 @@ class ConfigTests(unittest.TestCase):
                         "model_temperature: 0.2",
                         "model_timeout_seconds: 12",
                         "model_max_output_tokens: 256",
+                        "model_max_retries: 2",
+                        "model_retry_backoff_seconds: 0.5",
                         "model_store_prompts: false",
                         "search_provider: brave",
                         "search_api_key_env: TEST_SEARCH_KEY",
                         "search_result_limit: 8",
+                        "search_query_count: 3",
                         "search_fetch_pages: true",
                         "search_store_raw_pages: true",
                         "search_hybrid_providers: brave, serpapi, static",
+                        "evidence_freshness_days: official_doc=120,community=30,unknown=45",
+                        "evidence_source_priority: official_doc=50,community=20,unknown=1",
                     ]
                 ),
                 encoding="utf-8",
@@ -83,10 +88,34 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.model_temperature, 0.2)
             self.assertEqual(config.model_timeout_seconds, 12)
             self.assertEqual(config.model_max_output_tokens, 256)
+            self.assertEqual(config.model_max_retries, 2)
+            self.assertEqual(config.model_retry_backoff_seconds, 0.5)
             self.assertFalse(config.model_store_prompts)
             self.assertEqual(config.search_provider, "brave")
             self.assertEqual(config.search_api_key_env, "TEST_SEARCH_KEY")
             self.assertEqual(config.search_result_limit, 8)
+            self.assertEqual(config.search_query_count, 3)
             self.assertTrue(config.search_fetch_pages)
             self.assertTrue(config.search_store_raw_pages)
             self.assertEqual(config.search_hybrid_providers, ("brave", "serpapi", "static"))
+            self.assertEqual(config.evidence_freshness_days["official_doc"], 120)
+            self.assertEqual(config.evidence_freshness_days["community"], 30)
+            self.assertEqual(config.evidence_freshness_days["unknown"], 45)
+            self.assertEqual(config.evidence_freshness_days["standard"], 730)
+            self.assertEqual(config.evidence_source_priority["official_doc"], 50)
+            self.assertEqual(config.evidence_source_priority["community"], 20)
+            self.assertEqual(config.evidence_source_priority["unknown"], 1)
+            self.assertEqual(config.evidence_source_priority["standard"], 80)
+
+    def test_invalid_evidence_freshness_mapping_fails_fast(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.yaml"
+            config_path.write_text(
+                "evidence_freshness_days: official_doc=never\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                load_config(config_path)

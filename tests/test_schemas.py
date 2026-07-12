@@ -24,6 +24,24 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             EvidenceItem(title="", url="https://example.com")
 
+    def test_evidence_item_round_trip_preserves_policy_metadata(self) -> None:
+        item = EvidenceItem(
+            title="Official docs",
+            url="https://example.com/docs",
+            source_type="official_doc",
+            confidence="high",
+            confidence_reason="Official and recently updated.",
+            freshness="fresh",
+        )
+
+        loaded = EvidenceItem.from_dict(item.to_dict())
+
+        self.assertEqual(loaded.freshness, "fresh")
+        self.assertEqual(
+            loaded.confidence_reason,
+            "Official and recently updated.",
+        )
+
 
     def test_knowledge_merge_proposal_round_trip(self) -> None:
         proposal = KnowledgeMergeProposal(

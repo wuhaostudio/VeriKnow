@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,13 +37,24 @@ DEFAULT_CONFIG = {
     "model_temperature": 0,
     "model_timeout_seconds": 60,
     "model_max_output_tokens": 4000,
+    "model_max_retries": 1,
+    "model_retry_backoff_seconds": 0.25,
     "model_store_prompts": True,
     "search_provider": "static",
     "search_api_key_env": "",
     "search_result_limit": 5,
+    "search_query_count": 1,
     "search_fetch_pages": False,
     "search_store_raw_pages": False,
     "search_hybrid_providers": "brave,serpapi,static",
+    "evidence_freshness_days": (
+        "official_doc=365,official_github=180,standard=730,vendor_blog=180,"
+        "community=90,search_result=30,unknown=90"
+    ),
+    "evidence_source_priority": (
+        "official_doc=100,official_github=90,standard=80,vendor_blog=65,"
+        "community=40,search_result=20,unknown=10"
+    ),
 }
 
 
@@ -77,13 +88,38 @@ class Config:
     model_temperature: float = 0
     model_timeout_seconds: int = 60
     model_max_output_tokens: int = 4000
+    model_max_retries: int = 1
+    model_retry_backoff_seconds: float = 0.25
     model_store_prompts: bool = True
     search_provider: str = "static"
     search_api_key_env: str = ""
     search_result_limit: int = 5
+    search_query_count: int = 1
     search_fetch_pages: bool = False
     search_store_raw_pages: bool = False
     search_hybrid_providers: tuple[str, ...] = ("brave", "serpapi", "static")
+    evidence_freshness_days: dict[str, int] = field(
+        default_factory=lambda: {
+            "official_doc": 365,
+            "official_github": 180,
+            "standard": 730,
+            "vendor_blog": 180,
+            "community": 90,
+            "search_result": 30,
+            "unknown": 90,
+        }
+    )
+    evidence_source_priority: dict[str, int] = field(
+        default_factory=lambda: {
+            "official_doc": 100,
+            "official_github": 90,
+            "standard": 80,
+            "vendor_blog": 65,
+            "community": 40,
+            "search_result": 20,
+            "unknown": 10,
+        }
+    )
 
     @property
     def runs_dir(self) -> Path:
@@ -171,11 +207,14 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         computer_use_action_agent=str(
             values.get("computer_use_action_agent", DEFAULT_CONFIG["computer_use_action_agent"])
         ),
-        default_reverify_interval_days=int(
-            values.get(
-                "default_reverify_interval_days",
-                DEFAULT_CONFIG["default_reverify_interval_days"],
-            )
+        default_reverify_interval_days=max(
+            1,
+            int(
+                values.get(
+                    "default_reverify_interval_days",
+                    DEFAULT_CONFIG["default_reverify_interval_days"],
+                )
+            ),
         ),
         model_provider=str(values.get("model_provider", DEFAULT_CONFIG["model_provider"])),
         model_name=str(values.get("model_name", DEFAULT_CONFIG["model_name"])),
@@ -188,12 +227,37 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         model_max_output_tokens=int(
             values.get("model_max_output_tokens", DEFAULT_CONFIG["model_max_output_tokens"])
         ),
+        model_max_retries=max(
+            0,
+            int(values.get("model_max_retries", DEFAULT_CONFIG["model_max_retries"])),
+        ),
+        model_retry_backoff_seconds=max(
+            0.0,
+            float(
+                values.get(
+                    "model_retry_backoff_seconds",
+                    DEFAULT_CONFIG["model_retry_backoff_seconds"],
+                )
+            ),
+        ),
         model_store_prompts=_parse_bool(
             values.get("model_store_prompts", DEFAULT_CONFIG["model_store_prompts"])
         ),
         search_provider=str(values.get("search_provider", DEFAULT_CONFIG["search_provider"])),
         search_api_key_env=str(values.get("search_api_key_env", DEFAULT_CONFIG["search_api_key_env"])),
         search_result_limit=int(values.get("search_result_limit", DEFAULT_CONFIG["search_result_limit"])),
+        search_query_count=min(
+            5,
+            max(
+                1,
+                int(
+                    values.get(
+                        "search_query_count",
+                        DEFAULT_CONFIG["search_query_count"],
+                    )
+                ),
+            ),
+        ),
         search_fetch_pages=_parse_bool(
             values.get("search_fetch_pages", DEFAULT_CONFIG["search_fetch_pages"])
         ),
@@ -202,6 +266,20 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         search_hybrid_providers=_parse_csv_setting(
             values.get("search_hybrid_providers", DEFAULT_CONFIG["search_hybrid_providers"])
+        ),
+        evidence_freshness_days=_merge_int_map_setting(
+            values.get(
+                "evidence_freshness_days",
+                DEFAULT_CONFIG["evidence_freshness_days"],
+            ),
+            DEFAULT_CONFIG["evidence_freshness_days"],
+        ),
+        evidence_source_priority=_merge_int_map_setting(
+            values.get(
+                "evidence_source_priority",
+                DEFAULT_CONFIG["evidence_source_priority"],
+            ),
+            DEFAULT_CONFIG["evidence_source_priority"],
         ),
     )
 
@@ -263,3 +341,39 @@ def _parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_int_map_setting(value: Any) -> dict[str, int]:
+    if isinstance(value, dict):
+        items = value.items()
+    else:
+        pairs: list[tuple[str, str]] = []
+        for item in str(value).split(","):
+            key, separator, raw_number = item.partition("=")
+            if separator:
+                pairs.append((key, raw_number))
+        items = pairs
+
+    parsed: dict[str, int] = {}
+    for key, raw_number in items:
+        normalized_key = str(key).strip().lower()
+        if not normalized_key:
+            continue
+        try:
+            number = int(str(raw_number).strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid integer mapping value for {normalized_key}: {raw_number}"
+            ) from exc
+        if number <= 0:
+            raise ValueError(f"integer mapping value for {normalized_key} must be positive")
+        parsed[normalized_key] = number
+    if not parsed:
+        raise ValueError("integer mapping setting must include at least one key=value pair")
+    return parsed
+
+
+def _merge_int_map_setting(value: Any, defaults: Any) -> dict[str, int]:
+    merged = _parse_int_map_setting(defaults)
+    merged.update(_parse_int_map_setting(value))
+    return merged

@@ -140,6 +140,7 @@ class MarkdownTests(unittest.TestCase):
 
             self.assertIn('verified_at: "2026-06-11T04:03:37+00:00"', report)
             self.assertIn('next_verify_at: "2026-07-11"', report)
+            self.assertIn("reverify_interval_days: 30", report)
             self.assertIn("## Step-by-Step Guide", report)
             self.assertIn("Verification status: partial", report)
             self.assertIn("![Step 1 screenshot](screenshots/step-01.png)", report)

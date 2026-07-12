@@ -4,6 +4,8 @@ import difflib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +70,9 @@ class KnowledgeCurator:
             run_id=record.run_id,
             target_path=str(target_path),
             diff=diff,
+            operation="update" if target_path.exists() else "create",
+            proposed_content=report_content,
+            base_content_hash=_content_hash(original_content),
             approved=False,
         )
 
@@ -98,6 +103,9 @@ class KnowledgeCurator:
             run_id=record.run_id,
             target_path=str(target_path),
             diff=diff,
+            operation="update" if target_path.exists() else "create",
+            proposed_content=report_content,
+            base_content_hash=_content_hash(original_content),
             approved=False,
         )
 
@@ -128,6 +136,8 @@ class KnowledgeCurator:
             evidence_urls=evidence_urls,
             conflicts=conflicts,
             diff=patch.diff,
+            proposed_content=patch.proposed_content or report_content,
+            base_content_hash=patch.base_content_hash,
             risk_level=risk_level,
         )
 
@@ -139,6 +149,13 @@ class KnowledgeCurator:
     ) -> tuple[Path, Path]:
         diff_path = run_dir / "patch.diff"
         patch_path = run_dir / "knowledge_patch.json"
+        if proposal is not None:
+            if proposal.run_id != patch.run_id or proposal.target_path != patch.target_path:
+                raise ValueError("merge proposal does not match the knowledge patch")
+            patch.operation = proposal.operation
+            patch.diff = proposal.diff
+            patch.proposed_content = proposal.proposed_content
+            patch.base_content_hash = proposal.base_content_hash
         diff_path.write_text(patch.diff, encoding="utf-8")
         patch_path.write_text(
             json.dumps(patch.to_dict(), ensure_ascii=False, indent=2),
@@ -161,19 +178,50 @@ class KnowledgeCurator:
     ) -> KnowledgePatch:
         if not report_path.exists():
             raise FileNotFoundError(f"report not found: {report_path}")
+        if patch.operation not in {
+            "create",
+            "update",
+            "append",
+            "replace_section",
+            "mark_stale",
+        }:
+            raise ValueError(f"unsupported knowledge patch operation: {patch.operation}")
+        if patch.base_content_hash and not re.fullmatch(
+            r"[0-9a-f]{64}",
+            patch.base_content_hash,
+        ):
+            raise ValueError("knowledge patch base_content_hash is invalid")
         target_path = Path(patch.target_path)
         target_resolved = target_path.resolve()
         knowledge_resolved = knowledge_dir.resolve()
         if not target_resolved.is_relative_to(knowledge_resolved):
             raise ValueError(f"patch target is outside knowledge directory: {target_path}")
 
+        current_content = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+        if patch.base_content_hash and _content_hash(current_content) != patch.base_content_hash:
+            raise ValueError(
+                "knowledge document changed after the patch was generated; curate again before apply"
+            )
+        proposed_content = patch.proposed_content or report_path.read_text(encoding="utf-8")
+        expected_diff = _unified_diff(
+            current_content,
+            proposed_content,
+            fromfile=str(target_path),
+            tofile=str(report_path),
+        )
+        if patch.diff.strip() != expected_diff.strip():
+            raise ValueError("knowledge patch diff does not match its proposed content")
+
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(report_path.read_text(encoding="utf-8"), encoding="utf-8")
+        target_path.write_text(proposed_content, encoding="utf-8")
 
         approved = KnowledgePatch(
             run_id=patch.run_id,
             target_path=patch.target_path,
             diff=patch.diff,
+            operation=patch.operation,
+            proposed_content=proposed_content,
+            base_content_hash=patch.base_content_hash,
             approved=True,
             created_at=patch.created_at,
         )
@@ -248,7 +296,12 @@ class AIKnowledgeCurator:
                     related_documents=related_documents,
                 ),
             )
-            proposal = self._proposal_from_output(output, seed=seed, patch=patch)
+            proposal = self._proposal_from_output(
+                output,
+                seed=seed,
+                patch=patch,
+                report_path=report_path,
+            )
             artifact = CurationArtifact(
                 strategy="ai",
                 provider=self.llm.provider,
@@ -281,8 +334,12 @@ class AIKnowledgeCurator:
         return (
             "Create a VeriKnow KnowledgeMergeProposal JSON object from the supplied report, "
             "patch, seed proposal, and related knowledge documents. Return fields: operation, "
-            "target_path, target_title, rationale, evidence_urls, conflicts, diff, risk_level. "
+            "target_path, target_title, rationale, evidence_urls, conflicts, proposed_content, "
+            "section_heading, risk_level. "
             "Allowed operations are create, update, append, replace_section, mark_stale. "
+            "For create/update return the complete proposed Markdown document. For append return "
+            "only the Markdown fragment to append. For replace_section return the replacement "
+            "section and its existing section_heading. mark_stale needs no proposed_content. "
             "Every substantial new claim must be supported by an evidence URL. Preserve unresolved "
             "conflicts instead of silently resolving them. Do not change target_path outside the "
             "seed proposal target."
@@ -305,6 +362,14 @@ class AIKnowledgeCurator:
                 "path": str(report_path),
                 "content": report_path.read_text(encoding="utf-8"),
             },
+            "target": {
+                "path": patch.target_path,
+                "content": (
+                    Path(patch.target_path).read_text(encoding="utf-8")
+                    if Path(patch.target_path).exists()
+                    else ""
+                ),
+            },
             "related_documents": [
                 {
                     "path": str(document.path),
@@ -321,6 +386,7 @@ class AIKnowledgeCurator:
         *,
         seed: KnowledgeMergeProposal,
         patch: KnowledgePatch,
+        report_path: Path,
     ) -> KnowledgeMergeProposal:
         operation = str(output.get("operation", "")).strip()
         if operation not in {"create", "update", "append", "replace_section", "mark_stale"}:
@@ -332,20 +398,67 @@ class AIKnowledgeCurator:
 
         target_title = str(output.get("target_title", "")).strip()
         rationale = str(output.get("rationale", "")).strip()
-        diff = str(output.get("diff", ""))
         risk_level = str(output.get("risk_level", "medium")).strip()
         if not target_title or not rationale:
             raise ValueError("model merge proposal requires target_title and rationale")
         if risk_level not in {"low", "medium", "high"}:
             raise ValueError(f"unsupported merge risk_level: {risk_level}")
-        if not diff.strip():
-            raise ValueError("model merge proposal requires a diff")
-        if not _same_diff_effect(diff, patch.diff):
-            raise ValueError("model merge proposal diff must preserve the generated patch content")
-
         evidence_urls = _string_list(output.get("evidence_urls"))
+        conflicts = _string_list(output.get("conflicts"))
         if operation in {"create", "update", "append", "replace_section"} and not evidence_urls:
             raise ValueError("model merge proposal requires evidence_urls for content changes")
+        minimum_risk = _risk_level_for(operation, conflicts)
+        if _risk_rank(risk_level) < _risk_rank(minimum_risk):
+            raise ValueError(
+                f"model merge risk_level {risk_level} understates required risk {minimum_risk}"
+            )
+
+        target_path_object = Path(seed.target_path)
+        original_content = (
+            target_path_object.read_text(encoding="utf-8")
+            if target_path_object.exists()
+            else ""
+        )
+        if operation == "create" and original_content:
+            raise ValueError("create operation requires a new target document")
+        if operation != "create" and not original_content:
+            raise ValueError(f"{operation} operation requires an existing target document")
+
+        raw_content = str(
+            output.get("proposed_content", output.get("content", "")) or ""
+        )
+        section_heading = str(output.get("section_heading", "")).strip()
+        proposed_content = _content_for_operation(
+            operation,
+            original_content,
+            raw_content,
+            section_heading=section_heading,
+            stale_reason=rationale,
+        )
+        if operation != "mark_stale":
+            missing_evidence = [
+                url for url in evidence_urls if url not in proposed_content
+            ]
+            if missing_evidence:
+                raise ValueError(
+                    f"proposed content does not contain evidence URLs: {missing_evidence}"
+                )
+            new_urls = set(_extract_urls(proposed_content)) - set(
+                _extract_urls(original_content)
+            )
+            undeclared_urls = sorted(new_urls - set(evidence_urls))
+            if undeclared_urls:
+                raise ValueError(
+                    f"proposed content contains undeclared evidence URLs: {undeclared_urls}"
+                )
+            _validate_source_metadata(original_content, proposed_content)
+
+        diff = _unified_diff(
+            original_content,
+            proposed_content,
+            fromfile=seed.target_path,
+            tofile=str(report_path),
+        )
 
         return KnowledgeMergeProposal(
             run_id=seed.run_id,
@@ -354,8 +467,11 @@ class AIKnowledgeCurator:
             target_title=target_title,
             rationale=rationale,
             evidence_urls=evidence_urls,
-            conflicts=_string_list(output.get("conflicts")),
+            conflicts=conflicts,
             diff=diff,
+            proposed_content=proposed_content,
+            base_content_hash=_content_hash(original_content),
+            section_heading=section_heading,
             risk_level=risk_level,
         )
 
@@ -430,9 +546,15 @@ def _extract_conflict_lines(content: str) -> list[str]:
 def _risk_level_for(operation: str, conflicts: list[str]) -> str:
     if conflicts:
         return "high"
-    if operation == "update":
+    if operation == "mark_stale":
+        return "high"
+    if operation in {"update", "append", "replace_section"}:
         return "medium"
     return "low"
+
+
+def _risk_rank(value: str) -> int:
+    return {"low": 1, "medium": 2, "high": 3}.get(value, 0)
 
 
 def _proposal_rationale(operation: str, title: str, evidence_urls: list[str], conflicts: list[str]) -> str:
@@ -448,5 +570,185 @@ def _string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-def _same_diff_effect(candidate: str, expected: str) -> bool:
-    return candidate.strip() == expected.strip()
+def _content_hash(content: str) -> str:
+    return sha256(content.encode("utf-8")).hexdigest()
+
+
+def _content_for_operation(
+    operation: str,
+    original_content: str,
+    raw_content: str,
+    *,
+    section_heading: str,
+    stale_reason: str,
+) -> str:
+    if operation in {"create", "update"}:
+        if not raw_content.strip():
+            raise ValueError(f"{operation} operation requires proposed_content")
+        return _normalized_markdown(raw_content)
+    if operation == "append":
+        if not raw_content.strip():
+            raise ValueError("append operation requires proposed_content")
+        return _append_markdown(original_content, raw_content)
+    if operation == "replace_section":
+        if not section_heading:
+            raise ValueError("replace_section operation requires section_heading")
+        if not raw_content.strip():
+            raise ValueError("replace_section operation requires proposed_content")
+        return _replace_markdown_section(original_content, section_heading, raw_content)
+    if operation == "mark_stale":
+        return _mark_markdown_stale(original_content, stale_reason)
+    raise ValueError(f"unsupported merge operation: {operation}")
+
+
+def _append_markdown(original_content: str, fragment: str) -> str:
+    if not original_content.strip():
+        raise ValueError("append operation requires non-empty original content")
+    return f"{original_content.rstrip()}\n\n{fragment.strip()}\n"
+
+
+def _replace_markdown_section(
+    original_content: str,
+    section_heading: str,
+    replacement: str,
+) -> str:
+    lines = original_content.splitlines()
+    requested = re.sub(r"^#{1,6}\s+", "", section_heading.strip()).casefold()
+    matches: list[tuple[int, int, str]] = []
+    in_fence = False
+    for index, line in enumerate(lines):
+        if _is_fence_line(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match and match.group(2).strip().casefold() == requested:
+            matches.append((index, len(match.group(1)), line))
+    if not matches:
+        raise ValueError(f"section heading was not found in target document: {section_heading}")
+    if len(matches) > 1:
+        raise ValueError(f"section heading is ambiguous in target document: {section_heading}")
+    start, heading_level, heading_line = matches[0]
+
+    end = len(lines)
+    in_fence = False
+    for index in range(start + 1, len(lines)):
+        if _is_fence_line(lines[index]):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = re.match(r"^(#{1,6})\s+", lines[index])
+        if match and len(match.group(1)) <= heading_level:
+            end = index
+            break
+
+    replacement_lines = replacement.strip().splitlines()
+    first_heading = (
+        re.match(r"^(#{1,6})\s+(.+?)\s*$", replacement_lines[0])
+        if replacement_lines
+        else None
+    )
+    if first_heading:
+        replacement_title = first_heading.group(2).strip().casefold()
+        if replacement_title != requested:
+            raise ValueError("replacement section heading does not match section_heading")
+        if len(first_heading.group(1)) != heading_level:
+            raise ValueError("replacement section heading level must match the target section")
+    else:
+        replacement_lines = [heading_line, "", *replacement_lines]
+
+    in_fence = False
+    for line in replacement_lines[1:]:
+        if _is_fence_line(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        nested_heading = re.match(r"^(#{1,6})\s+", line)
+        if nested_heading and len(nested_heading.group(1)) <= heading_level:
+            raise ValueError("replacement content cannot escape the selected section")
+
+    combined = [*lines[:start], *replacement_lines, *lines[end:]]
+    return _normalized_markdown("\n".join(combined))
+
+
+def _mark_markdown_stale(content: str, reason: str) -> str:
+    lines = content.splitlines()
+    status_line = 'status: "stale"'
+    next_verify_line = f'next_verify_at: "{date.today().isoformat()}"'
+    reason_line = f'stale_reason: {json.dumps(reason, ensure_ascii=False)}'
+    if lines and lines[0].strip() == "---":
+        try:
+            end = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+        except StopIteration as exc:
+            raise ValueError("target document has invalid front matter") from exc
+        front_matter = lines[1:end]
+        front_matter = _replace_front_matter_value(front_matter, "status", status_line)
+        front_matter = _replace_front_matter_value(
+            front_matter,
+            "next_verify_at",
+            next_verify_line,
+        )
+        front_matter = _replace_front_matter_value(
+            front_matter,
+            "stale_reason",
+            reason_line,
+        )
+        return _normalized_markdown(
+            "\n".join(["---", *front_matter, "---", *lines[end + 1 :]])
+        )
+    return _normalized_markdown(
+        "\n".join(
+            [
+                "---",
+                status_line,
+                next_verify_line,
+                reason_line,
+                "---",
+                "",
+                *lines,
+            ]
+        )
+    )
+
+
+def _is_fence_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return stripped.startswith("```") or stripped.startswith("~~~")
+
+
+def _replace_front_matter_value(lines: list[str], key: str, replacement: str) -> list[str]:
+    updated = list(lines)
+    for index, line in enumerate(updated):
+        if line.split(":", 1)[0].strip() == key:
+            updated[index] = replacement
+            return updated
+    updated.append(replacement)
+    return updated
+
+
+def _validate_source_metadata(original_content: str, proposed_content: str) -> None:
+    original_front_matter = _front_matter_text(original_content)
+    if "sources:" not in original_front_matter:
+        return
+    proposed_front_matter = _front_matter_text(proposed_content)
+    if "sources:" not in proposed_front_matter:
+        raise ValueError("proposed content cannot remove source metadata without replacement")
+    if _extract_urls(original_front_matter) and not _extract_urls(proposed_front_matter):
+        raise ValueError("proposed source metadata must include at least one replacement URL")
+
+
+def _front_matter_text(content: str) -> str:
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[1:index])
+    return ""
+
+
+def _normalized_markdown(content: str) -> str:
+    return content.rstrip() + "\n"
